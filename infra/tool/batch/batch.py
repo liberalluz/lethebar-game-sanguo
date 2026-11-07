@@ -45,7 +45,7 @@ DATED_ID_RE = re.compile(r"^[0-9]{8}-[0-9a-f]{6}$")
 CARD_ID_RE = re.compile(r"^B[0-9]+[a-z]?$")
 CARD_MARKER_RE = re.compile(r"<!--\s*batch-card\s*:\s*v1\s*-->")
 CARD_JSON_RE = re.compile(r"```json[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
-CARD_TYPES = {"feat", "fix", "process", "docs"}
+CARD_TYPES = {"feat", "fix", "docs", "test", "refactor", "chore", "ci"}
 DOCS_PROCESS = "process"
 DOCS_SDP = "sdp.md"
 DOCS_BATCHES = "batches"
@@ -117,27 +117,6 @@ def resolve_commit(root: Path, ref: str) -> str:
     """Resolve a branch or tag to the commit it points at, or return ""."""
     code, out, _ = run_git(root, ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])
     return out if code == 0 else ""
-
-
-def budget_anchor(root: Path, base: str, base_ref: str | None) -> str:
-    """Return the commit to diff against when counting scope and budget.
-
-    ``base`` is the branch point recorded when the batch started. If main moved
-    on afterwards and the branch was cut from the newer commit, diffing against
-    the old base would count the other PR's lines again. Prefer the merge base
-    with the current base branch, and fall back to the recorded commit.
-    """
-    head = resolve_commit(root, "HEAD")
-    ref = resolve_commit(root, base_ref) if base_ref else ""
-    if head and ref and ref != head:
-        code, out, _ = run_git(root, ["merge-base", head, ref])
-        if code == 0 and out:
-            return out.splitlines()[0]
-    if head:
-        code, out, _ = run_git(root, ["merge-base", head, base])
-        if code == 0 and out:
-            return out.splitlines()[0]
-    return base
 
 
 def config_path(root: Path) -> Path:
@@ -519,10 +498,11 @@ def matches(path: str, patterns: Sequence[str]) -> bool:
     return any(glob_regex(pattern).fullmatch(normalized) for pattern in patterns)
 
 
-def changed_paths(root: Path, anchor: str, config: dict[str, Any]) -> list[str]:
+def changed_paths(root: Path, base: str, config: dict[str, Any]) -> list[str]:
     paths: set[str] = set()
     for args in (
-        ["diff", "--name-only", anchor],
+        ["diff", "--name-only", f"{base}...HEAD"],
+        ["diff", "--name-only", "HEAD"],
         ["ls-files", "--others", "--exclude-standard"],
     ):
         code, out, _ = run_git(root, args)
@@ -545,11 +525,11 @@ def changed_paths(root: Path, anchor: str, config: dict[str, Any]) -> list[str]:
 
 
 def check_scope(
-    root: Path, card: dict[str, Any], anchor: str, config: dict[str, Any]
+    root: Path, card: dict[str, Any], base: str, config: dict[str, Any]
 ) -> tuple[list[str], list[str]]:
     allowed = [str(item) for item in card.get("allowed", [])] or ["**"]
     forbidden = [str(item) for item in card.get("forbidden", [])]
-    changed = changed_paths(root, anchor, config)
+    changed = changed_paths(root, base, config)
     violations: list[str] = []
     for path in changed:
         if matches(path, forbidden):
@@ -580,107 +560,10 @@ def check_skills(root: Path, card: dict[str, Any]) -> tuple[list[str], dict[str,
     return violations, found
 
 
-SKILL_EVIDENCE_DIR = Path("evidence") / "skills"
-SKILL_EVIDENCE_STATUSES = {"applied", "partial", "skipped"}
-VAGUE_CHANGE = {
-    "applied",
-    "used",
-    "read",
-    "loaded",
-    "yes",
-    "no",
-    "n/a",
-    "na",
-    "none",
-    "-",
-    "skill applied",
-    "used the skill",
-    "read the skill",
-    "loaded the skill",
-}
-
-
-def skill_evidence_path(root: Path, batch_id: str, skill_id: str) -> Path:
-    return batch_dir(root, batch_id) / SKILL_EVIDENCE_DIR / f"{skill_id}.md"
-
-
-def read_skill_evidence(path: Path) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return fields
-    for line in text.splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        fields[key.strip().lower()] = value.strip()
-    return fields
-
-
-def proof_looks_like_path(proof: str) -> bool:
-    if proof.startswith(("http://", "https://")):
-        return False
-    if not re.fullmatch(r"[A-Za-z0-9_./-]+(?::[0-9]+)?", proof):
-        return False
-    return "/" in proof or "." in proof
-
-
-def check_skill_evidence(
-    root: Path, batch_id: str, card: dict[str, Any]
-) -> tuple[list[str], list[str], dict[str, dict[str, Any]]]:
-    errors: list[str] = []
-    warnings: list[str] = []
-    records: dict[str, dict[str, Any]] = {}
-    for item in card.get("skills", []):
-        skill_id = str(item.get("id", ""))
-        required = bool(item.get("required"))
-        path = skill_evidence_path(root, batch_id, skill_id)
-        relative = source_relative(root, path)
-        if not path.is_file():
-            if required:
-                errors.append(
-                    f"skill {skill_id}: missing evidence file {relative} "
-                    "(status, changed, proof)"
-                )
-            continue
-        fields = read_skill_evidence(path)
-        status = fields.get("status", "").lower()
-        changed = fields.get("changed", "")
-        proof = fields.get("proof", "")
-        if status not in SKILL_EVIDENCE_STATUSES:
-            errors.append(
-                f"skill {skill_id}: evidence status must be applied, partial, or skipped"
-            )
-        if not changed or changed.strip().lower() in VAGUE_CHANGE:
-            errors.append(
-                f"skill {skill_id}: 'changed' must say what changed, "
-                "not repeat the status"
-            )
-        elif len(changed) < 12:
-            warnings.append(f"skill {skill_id}: 'changed' is very short")
-        if not proof:
-            errors.append(f"skill {skill_id}: 'proof' is empty")
-        elif proof_looks_like_path(proof):
-            target = proof.split(":", 1)[0]
-            if not (root / target).exists():
-                errors.append(f"skill {skill_id}: proof path does not exist: {proof}")
-        if required and status == "skipped":
-            errors.append(f"skill {skill_id}: a required skill cannot be skipped")
-        records[skill_id] = {
-            "status": status,
-            "changed": changed,
-            "proof": proof,
-            "required": required,
-            "file": relative,
-        }
-    return errors, warnings, records
-
-
 def diff_stats(
-    root: Path, anchor: str, changed: Sequence[str]
+    root: Path, base: str, changed: Sequence[str]
 ) -> tuple[int, int, int]:
-    code, out, err = run_git(root, ["diff", "--numstat", "--no-renames", anchor])
+    code, out, err = run_git(root, ["diff", "--numstat", "--no-renames", base])
     if code != 0:
         raise SystemExit(f"could not count batch diff: {err}")
     allowed = set(changed)
@@ -718,12 +601,12 @@ def diff_stats(
 
 
 def check_budget(
-    root: Path, card: dict[str, Any], anchor: str, changed: Sequence[str]
+    root: Path, card: dict[str, Any], base: str, changed: Sequence[str]
 ) -> tuple[int, int, int, str | None]:
     budget = card.get("size_budget")
     if type(budget) is not int or budget < 1:
         return 0, 0, 0, None
-    added, deleted, binary = diff_stats(root, anchor, changed)
+    added, deleted, binary = diff_stats(root, base, changed)
     total = added + deleted
     if total > budget:
         message = f"budget: {total} changed lines exceeds {budget}"
@@ -1062,11 +945,6 @@ def cmd_start(args: argparse.Namespace) -> int:
     if not base:
         print(f"base does not resolve to a commit: {base_ref}", file=sys.stderr)
         return 1
-    skill_errors, skill_found = check_skills(root, card)
-    if skill_errors:
-        for item in skill_errors:
-            print(item, file=sys.stderr)
-        return 1
     slug = branch_slug(str(card.get("goal", "")))
     default_branch = f"{config.get('branch_prefix', 'batch/')}{batch_id}"
     if slug:
@@ -1087,21 +965,11 @@ def cmd_start(args: argparse.Namespace) -> int:
         "card_hash": card_hash(card),
         "source_sha256": card.get("source_sha256"),
         "started_at": utc_now(),
-        "skills": skill_found,
         "checks": {},
     }
     write_json(batch_dir(root, batch_id) / "state.json", state)
     set_active(root, batch_id)
     print(f"started {batch_id} on {branch} (base {base})")
-    if skill_found:
-        print("skills to load before editing:")
-        for item in card.get("skills", []):
-            skill_id = str(item.get("id", ""))
-            plan = "required" if item.get("required") else "optional"
-            print(f"  - {skill_id} ({plan})  {skill_found.get(skill_id, '')}")
-        print(
-            f"record each skill in .batch/{batch_id}/evidence/skills/<skill-id>.md"
-        )
     return 0
 
 
@@ -1149,21 +1017,11 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 1
     state["base"] = base
     state["base_ref"] = state.get("base_ref") or base_ref
-    anchor = budget_anchor(root, base, state["base_ref"])
-    state["scope_base"] = anchor
-    changed, violations = check_scope(root, card, anchor, config)
-    added, deleted, binary, budget_error = check_budget(root, card, anchor, changed)
+    changed, violations = check_scope(root, card, base, config)
+    added, deleted, binary, budget_error = check_budget(root, card, base, changed)
     changelog_errors, changelog_warnings = check_changelog(root, card, changed)
     skill_errors, skill_found = check_skills(root, card)
-    evidence_errors, evidence_warnings, skill_records = check_skill_evidence(
-        root, batch_id, card
-    )
-    gate_errors = [
-        *violations,
-        *changelog_errors,
-        *skill_errors,
-        *evidence_errors,
-    ]
+    gate_errors = [*violations, *changelog_errors, *skill_errors]
     if budget_error:
         gate_errors.append(budget_error)
 
@@ -1182,15 +1040,11 @@ def cmd_check(args: argparse.Namespace) -> int:
         append_evidence(root, batch_id, f"warn: {warning}")
     for violation in skill_errors:
         append_evidence(root, batch_id, violation)
-    for violation in evidence_errors:
-        append_evidence(root, batch_id, violation)
-    for warning in evidence_warnings:
-        append_evidence(root, batch_id, f"warn: {warning}")
     if budget_error:
         append_evidence(root, batch_id, budget_error)
     for violation in gate_errors:
         print(f"[fail] {violation}", file=sys.stderr)
-    for warning in [*changelog_warnings, *evidence_warnings]:
+    for warning in changelog_warnings:
         print(f"[warn] {warning}", file=sys.stderr)
 
     results = run_checks(root, batch_id, config) if not gate_errors else {}
@@ -1205,7 +1059,6 @@ def cmd_check(args: argparse.Namespace) -> int:
         "added": added,
         "deleted": deleted,
         "binary": binary,
-        "measured_from": anchor,
         "result": "pass" if not budget_error and not violations else "fail",
     }
     state["changelog"] = {
@@ -1213,74 +1066,54 @@ def cmd_check(args: argparse.Namespace) -> int:
         "warnings": changelog_warnings,
     }
     state["skills"] = skill_found
-    state["skill_evidence"] = skill_records
     state["checked_at"] = utc_now()
     write_json(batch_dir(root, batch_id) / "state.json", state)
     print(f"scope: {'PASS' if not violations else 'FAIL'} ({len(changed)} paths)")
     print(
         f"budget: {'SKIP' if not card.get('size_budget') else ('FAIL' if budget_error else 'PASS')}"
-        f" ({added + deleted} lines from {anchor[:12]})"
+        f" ({added + deleted} lines)"
     )
     print(f"changelog: {'FAIL' if changelog_errors else 'PASS'}")
-    print(
-        f"skills: {'FAIL' if skill_errors or evidence_errors else 'PASS'}"
-        + (
-            " ("
-            + ", ".join(
-                f"{skill_id} {record['status']}"
-                for skill_id, record in skill_records.items()
-            )
-            + ")"
-            if skill_records
-            else ""
-        )
-    )
+    print(f"skills: {'FAIL' if skill_errors else 'PASS'}")
     print(f"result: {'PASS' if passed else 'FAIL'}")
     return 0 if passed else 1
 
 
-def pr_body(root: Path, batch_id: str) -> str:
-    card = read_card(root, batch_id)
-    state = read_state(root, batch_id)
-    changed = changed_paths(root, str(state.get("base", "main")), load_config(root))
-    lines = [
-        f"# {card.get('goal', '')}",
-        "",
-        "## Batch",
-        "",
-        f"- ID: `{batch_id}`",
-        f"- Branch: `{state.get('branch', '')}`",
-        f"- Base: `{state.get('base', '')}`",
-        "",
-        "## Scope",
-        "",
-        "Allowed:",
-        *[f"- `{item}`" for item in card.get("allowed", [])],
-        "",
-        f"Changed files: {len(changed)}",
-        *[f"- `{item}`" for item in changed],
-        "",
-        "## Checks",
-        "",
-    ]
-    checks = state.get("checks", {})
-    if checks:
-        lines.extend(f"- {name}: {result.get('status')}" for name, result in checks.items())
-    else:
-        lines.append("- none configured")
-    lines.extend(["", "## Acceptance", ""])
-    criteria = card.get("acceptance", card.get("exit_criteria", []))
-    lines.extend(f"- {item}" for item in criteria) if criteria else lines.append("- none recorded")
-    lines.extend(
-        [
-            "",
-            "## Evidence",
-            "",
-            f"- `.batch/{batch_id}/evidence.log`",
-            "",
-        ]
-    )
-    return "\n".join(lines)
+PR_BODY_SOURCE = "pr-body.source.md"
+PR_BODY_SECTIONS = (
+    "## Summary",
+    "## Impact",
+    "## Verification",
+    "## Risks",
+    "## Self-check",
+)
+
+
+def pr_body(root: Path, batch_id: str) -> str | None:
+    """Return the hand-written body, or ``None`` when the writer skipped it.
+
+    A generated body is not a substitute: the pull request template asks five
+    questions a generator cannot answer, so a missing source file is an error.
+    """
+    written = batch_dir(root, batch_id) / PR_BODY_SOURCE
+    if not written.is_file():
+        return None
+    text = written.read_text(encoding="utf-8").strip()
+    return text or None
+
+
+def missing_sections(body: str) -> list[str]:
+    """Name the sections of the template a body is missing, in template order."""
+    positions = []
+    for name in PR_BODY_SECTIONS:
+        if name not in body:
+            positions.append(name)
+    return positions
+
+
+def sections_out_of_order(body: str) -> bool:
+    seen = [body.index(name) for name in PR_BODY_SECTIONS if name in body]
+    return seen != sorted(seen)
 
 
 def scaffold_language(root: Path) -> dict[str, Any]:
@@ -1334,23 +1167,29 @@ def pr_translations(
     digest: str,
     config: dict[str, Any],
     state: dict[str, Any],
-) -> list[str]:
-    """Write PR body translations through ``config.translate``; best effort."""
+) -> tuple[list[str], list[str]]:
+    """Write PR body translations through ``config.translate``.
+
+    Returns the locales written and the problems found. A missing hook, a hook
+    that exits non-zero and a hook that writes nothing are all problems: the
+    English body is authoritative, but a reader who cannot get the other
+    language is a failure of the hand-over, not a warning.
+    """
     language = scaffold_language(root)
     source_locale = language["external"]
     targets = [item for item in language["supported"] if item != source_locale]
     if not targets:
-        return []
+        return [], []
     command = config.get("translate")
     if not command:
-        print(
-            "config.translate is empty; skipped PR body translations",
-            file=sys.stderr,
-        )
-        return []
+        return [], [
+            "config.translate is empty; the PR body has no translation "
+            "(set LETHEBAR_TRANSLATION_FILE for the offline hook)"
+        ]
     card = read_card(root, batch_id)
     directory = batch_dir(root, batch_id)
     translations: list[dict[str, Any]] = []
+    problems: list[str] = []
     for locale in targets:
         out = directory / f"pr-body.{locale}.md"
         out.unlink(missing_ok=True)
@@ -1370,12 +1209,11 @@ def pr_translations(
         if out_text:
             print(out_text)
         if code != 0:
-            print(f"translation {locale} failed (exit {code})", file=sys.stderr)
-            if err_text:
-                print(err_text, file=sys.stderr)
+            detail = err_text.strip() or "no message"
+            problems.append(f"translation {locale} failed (exit {code}): {detail}")
             continue
         if not out.exists() or not out.read_text(encoding="utf-8").strip():
-            print(f"translation {locale}: hook produced no output", file=sys.stderr)
+            problems.append(f"translation {locale}: the hook produced no output")
             continue
         translations.append(
             {
@@ -1386,7 +1224,7 @@ def pr_translations(
             }
         )
     if not translations:
-        return []
+        return [], problems or ["no translation was written"]
     write_json(
         directory / "pr-body.manifest.json",
         {
@@ -1399,37 +1237,41 @@ def pr_translations(
         },
     )
     print(f"translations: {', '.join(item['locale'] for item in translations)}")
-    return [item["locale"] for item in translations]
+    return [item["locale"] for item in translations], problems
 
 
-def pr_skills(root: Path, batch_id: str) -> str:
-    """Render the skill usage report as a local review supplement."""
-    card = read_card(root, batch_id)
-    state = read_state(root, batch_id)
-    records = state.get("skill_evidence", {})
-    lines = [
-        "# Skills",
-        "",
-        "Local review supplement. Not part of the PR body; never committed.",
-        "",
-        "| Skill | Plan | Actual | What changed | Proof |",
-        "| --- | --- | --- | --- | --- |",
-    ]
-    for item in card.get("skills", []):
-        skill_id = str(item.get("id", ""))
-        record = records.get(skill_id, {})
-        plan = "required" if item.get("required") else "optional"
-        actual = str(record.get("status") or "missing")
-        changed = str(record.get("changed") or "-").replace("|", "\\|")
-        proof = str(record.get("proof") or "-").replace("|", "\\|")
-        lines.append(f"| `{skill_id}` | {plan} | {actual} | {changed} | {proof} |")
-    return "\n".join(lines) + "\n"
+def redo_translations(root: Path, batch_id: str, state: dict[str, Any]) -> int:
+    """Regenerate the PR body translations from the body already on disk.
+
+    ``pr --prepare`` refuses to run once a batch is merged, but a translator
+    can be improved afterwards, and the translation is a file in the batch
+    directory, not a part of the pull request.
+    """
+    body_path = root / str(state.get("pr_body") or "")
+    if not state.get("pr_body") or not body_path.is_file():
+        print(
+            "no prepared PR body to translate; run 'pr --prepare' first",
+            file=sys.stderr,
+        )
+        return 1
+    digest = hashlib.sha256(body_path.read_bytes()).hexdigest()
+    config = load_config(root)
+    locales, problems = pr_translations(root, batch_id, body_path, digest, config, state)
+    state["pr_translations"] = locales
+    write_json(batch_dir(root, batch_id) / "state.json", state)
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_pr(args: argparse.Namespace) -> int:
     root = args.root.resolve()
     batch_id = resolve_id(root, args.id)
     state = read_state(root, batch_id)
+    if args.translations_only:
+        return redo_translations(root, batch_id, state)
     if state.get("status") not in {"checked", "pr_ready"}:
         print("run 'check' successfully before preparing a PR", file=sys.stderr)
         return 1
@@ -1446,25 +1288,53 @@ def cmd_pr(args: argparse.Namespace) -> int:
         print(message, file=sys.stderr)
         return 1
     body = pr_body(root, batch_id)
+    if body is None:
+        print(
+            f"missing .batch/{batch_id}/{PR_BODY_SOURCE}; write the body first. "
+            "The template asks five questions:",
+            file=sys.stderr,
+        )
+        for name in PR_BODY_SECTIONS:
+            print(f"  {name}", file=sys.stderr)
+        return 1
+    missing = missing_sections(body)
+    if missing:
+        print(
+            "the body is missing template sections: " + ", ".join(missing),
+            file=sys.stderr,
+        )
+        return 1
+    if sections_out_of_order(body):
+        print(
+            "the body has the template sections out of order: "
+            + " -> ".join(PR_BODY_SECTIONS),
+            file=sys.stderr,
+        )
+        return 1
     body_path = args.body_file or (batch_dir(root, batch_id) / "pr-body.md")
     body_path = body_path if body_path.is_absolute() else root / body_path
     write_text(body_path, body + "\n")
-    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(body_path.read_bytes()).hexdigest()
     print(f"prepared {body_path.relative_to(root)}")
     print(f"body hash: {digest[:8]}")
     state["status"] = "pr_ready"
     state["pr_body"] = str(body_path.relative_to(root))
     state["pr_body_sha256"] = digest
     config = load_config(root)
-    state["pr_translations"] = pr_translations(
+    locales, problems = pr_translations(
         root, batch_id, body_path, digest, config, state
     )
-    if card.get("skills"):
-        skills_path = batch_dir(root, batch_id) / "pr-skills.md"
-        write_text(skills_path, pr_skills(root, batch_id))
-        state["pr_skills"] = skills_path.relative_to(root).as_posix()
-        print(f"skills report: {state['pr_skills']}")
+    state["pr_translations"] = locales
     write_json(batch_dir(root, batch_id) / "state.json", state)
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        print(
+            "the pull request body has no translation; fix the hook or set "
+            "LETHEBAR_TRANSLATION_FILE",
+            file=sys.stderr,
+        )
+        return 1
 
     if not args.create:
         return 0
@@ -1698,7 +1568,12 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("id", nargs="?")
     pr.add_argument("--prepare", action="store_true")
     pr.add_argument("--create", action="store_true")
-    pr.add_argument("--body-file")
+    pr.add_argument(
+        "--translations-only",
+        action="store_true",
+        help="redo the PR body translations from the body already on disk",
+    )
+    pr.add_argument("--body-file", type=Path)
     pr.add_argument("--confirm")
     pr.set_defaults(func=cmd_pr)
 
