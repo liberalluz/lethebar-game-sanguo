@@ -132,12 +132,27 @@ def write_descriptor(target: Path) -> Path:
     return sidecar
 
 
+def decode_gh_output(raw: bytes) -> str:
+    """Read what `gh` wrote, whatever the console would have called it.
+
+    `gh` writes UTF-8. Decoding it with the Windows code page raises on the first
+    byte outside ASCII — a Chinese release body is enough — and the failure lands
+    in a reader thread, where it reads as if the tool itself had broken while
+    the upload had in fact succeeded. A reply we only print cannot be worth a
+    traceback: a byte that is not UTF-8 becomes U+FFFD.
+    """
+    return raw.decode("utf-8", errors="replace")
+
+
 def release_exists(repo: str, tag: str) -> bool:
     """Ask GitHub whether the tag already carries a release."""
     probe = [gh(), "release", "view", tag, "--repo", repo]
-    return subprocess.run(
-        probe, check=False, capture_output=True, text=True
-    ).returncode == 0
+    completed = subprocess.run(probe, check=False, capture_output=True)
+    if completed.returncode != 0:
+        reason = decode_gh_output(completed.stderr).strip()
+        if reason:
+            print(f"gh release view: {reason}", file=sys.stderr)
+    return completed.returncode == 0
 
 
 def create_command(repo: str, tag: str) -> list[str]:
@@ -260,11 +275,18 @@ def self_test() -> int:
             "upload",
         ]:
             problems.append("an existing release is created again")
+        if decode_gh_output(b"\x94") != "\ufffd":
+            problems.append("a byte that is not UTF-8 is not replaced")
+        if decode_gh_output("三国".encode("utf-8")) != "三国":
+            problems.append("a UTF-8 reply is not read back")
     if problems:
         for problem in problems:
             print(f"[fail] {problem}")
         return 1
-    print("[ok] two builds are identical; the descriptor names the bytes; publish uploads both files")
+    print(
+        "[ok] two builds are identical; the descriptor names the bytes; "
+        "publish uploads both files; a reply outside UTF-8 does not raise"
+    )
     return 0
 
 
