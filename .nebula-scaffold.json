@@ -34,7 +34,8 @@
     "visibility": "public",
     "defaultBranch": "main",
     "codeowners": [
-      "@liberalluz"
+      "@liberalluz",
+      "@wilkommel"
     ],
     "review": {
       "requirePullRequest": true,
