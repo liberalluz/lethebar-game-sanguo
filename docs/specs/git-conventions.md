@@ -111,6 +111,8 @@ Scopes: pick exactly one from the closed list below.
   --root . --write --version vX.Y.Z --date YYYY-MM-DD` folds every fragment in
   `changelog.d/` into one section and deletes only the fragments it consumed.
   The release body is written for a player instead — what this version is, how
-  to install it, what the hash is — and it ships in both languages, English
-  first, the Chinese after it. A release with only one of the two is not done.
+  to install it, what the hash is — and it is written in the source language,
+  English. Translations are not published on the release: they live outside this
+  repository, in `lethebar-game-sanguo-docs` under
+  `records/<YYYY-MM>-release-vX.Y.Z/`（仓外，需另行检出）.
 - A tag is not moved once it is pushed.
