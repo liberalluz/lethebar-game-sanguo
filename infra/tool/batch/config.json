@@ -31,7 +31,16 @@
       "cwd": "."
     }
   ],
-  "translate": [],
+  "translate": [
+    "python",
+    "infra/tool/merge/translate_body.py",
+    "--body",
+    "{body}",
+    "--locale",
+    "{locale}",
+    "--out",
+    "{out}"
+  ],
   "pr_create": [],
   "merge": []
 }
