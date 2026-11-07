@@ -27,13 +27,16 @@ Scopes: pick exactly one from the closed list below.
 |---|---|
 | `pack` | A pack's content: `packs/*/manifest.json`, its `data/` and `assets/` |
 | `shared` | Material more than one pack uses: `shared/` |
-| `docs` | Everything under `docs/`: specs, decisions, baselines, intent, runbooks |
-| `repo` | Repository conventions and records: `README`, `CONTRIBUTING`, `SECURITY`, `NOTICE`, `CHANGELOG.md`, `docs/specs/git-conventions.md`, `.gitignore` |
+| `docs` | Everything under `docs/` except the records below: specs, decisions, intent, runbooks |
+| `repo` | Repository conventions and records: `README`, `CONTRIBUTING`, `SECURITY`, `NOTICE`, `CHANGELOG.md`, `docs/baselines.md`, `docs/baselines/`, `docs/specs/git-conventions.md`, `.gitignore` |
 | `infra` | Checks and tools written here: `infra/checks/`, our own scripts under `infra/tool/` |
 | `tools` | Tooling copied from the engine or Nebula: `infra/tool/batch/`, `infra/tool/release/`, `infra/tool/merge/` |
 
 - One scope per commit, no second level. A folder is a place, not a scope: a
   change under `docs/decisions/` is `docs`, not `docs(decisions)`.
+- A changelog fragment has no scope of its own. `changelog.d/` is where fragments
+  wait, not what they are about: a fragment rides with the commit that earns it
+  and takes that commit's scope.
 - The scope follows what the change is about, not where the file sits:
   `git-conventions.md` lives in `docs/` but its changes are `repo`.
 - Adding a scope means editing this table first, in the same pull request as its
