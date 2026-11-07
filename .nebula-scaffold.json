@@ -1,0 +1,58 @@
+{
+  "project": "lethebar-game-sanguo",
+  "stack": "godot",
+  "platforms": [
+    "browser",
+    "ios"
+  ],
+  "components": [
+    {
+      "name": "world",
+      "stack": "godot",
+      "dirs": [
+        "shared",
+        "packs"
+      ],
+      "platforms": [
+        "browser",
+        "ios"
+      ]
+    }
+  ],
+  "language": {
+    "primary": "en-US",
+    "supported": [
+      "en-US",
+      "zh-CN"
+    ],
+    "external": "en-US"
+  },
+  "repoPolicy": {
+    "version": 1,
+    "provider": "github",
+    "profile": "team",
+    "visibility": "public",
+    "defaultBranch": "main",
+    "codeowners": [
+      "@liberalluz"
+    ],
+    "review": {
+      "requirePullRequest": true,
+      "requiredApprovals": 1,
+      "requireCodeOwnerReview": true,
+      "dismissStaleApprovals": true,
+      "requireLastPushApproval": false,
+      "requireConversationResolution": false
+    },
+    "checks": {
+      "required": [],
+      "requireUpToDate": false
+    },
+    "linearHistory": false,
+    "push": {
+      "allowForce": false,
+      "allowDeletions": false
+    }
+  },
+  "created_at": "2026-11-07T06:45:48.433440+00:00"
+}
