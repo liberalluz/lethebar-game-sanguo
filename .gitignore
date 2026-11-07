@@ -47,3 +47,7 @@ __pycache__/
 # Nebula installation artifacts
 # Batch execution state
 .batch/
+
+# IDE
+.idea/
+.vscode/

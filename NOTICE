@@ -1,0 +1,14 @@
+Lethebar — Three Kingdoms world
+Copyright 2026 liberalluz
+
+The pack ships two assets of its own: packs/sanguo/assets/scene.png (the scene
+band) and packs/sanguo/assets/theme.wav (the theme). They are part of this work
+and are licensed under the same Apache License 2.0 as the rest of the
+repository.
+
+Third-party assets: none declared. If either asset turns out to reproduce
+someone else's work, see SECURITY.md — it will be replaced or the release
+withdrawn.
+
+The engine that plays this world is a separate repository and carries its own
+NOTICE; no engine code or font is redistributed here.
