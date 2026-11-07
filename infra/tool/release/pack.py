@@ -26,13 +26,15 @@ with `release not found`.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
-import tempfile
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 
 FIXED_TIME = (1980, 1, 1, 0, 0, 0)
@@ -42,6 +44,29 @@ MANIFEST = "manifest.json"
 def gh() -> str:
     """The GitHub client, overridable so a test can prove the order of calls."""
     return os.environ.get("LETHEBAR_GH", "gh")
+
+
+@contextlib.contextmanager
+def scratch(prefix: str) -> Iterator[Path]:
+    """A directory this process can remove again.
+
+    `tempfile` creates its directories with mode 0o700. A restricted file sandbox
+    refuses to read, write inside, or delete such a directory once it exists, so
+    the self-test builds its fixtures under `.batch/` — ignored by git — instead
+    of in the system temp directory.
+    """
+    base = Path(__file__).resolve().parents[3] / ".batch" / "tmp"
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / f"{prefix}-{os.getpid()}"
+    index = 0
+    while path.exists():
+        index += 1
+        path = base / f"{prefix}-{os.getpid()}-{index}"
+    path.mkdir()
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def files_of(root: Path) -> list[Path]:
@@ -197,9 +222,9 @@ def self_test() -> int:
     """Assert the properties this tool exists for, without touching the network."""
     problems: list[str] = []
     with (
-        tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as source,
-        tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as first,
-        tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as second,
+        scratch("self-test-source") as source,
+        scratch("self-test-first") as first,
+        scratch("self-test-second") as second,
     ):
         root = write_fixture(Path(source))
         one = build(root, Path(first))
