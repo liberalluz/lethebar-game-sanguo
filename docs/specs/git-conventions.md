@@ -82,6 +82,10 @@ Scopes: pick exactly one from the closed list below.
 - A squashed commit takes its subject from the branch commit, so the subject stays
   English and the PR title stays in the PR. Do not change the repository merge
   settings to route PR titles into `main`.
+- Do not pass the subject by hand. `gh pr merge --squash` without `--subject` keeps
+  the branch subject and appends `(#<number>)`, which `pr_merge.py --verify-only`
+  requires; a hand-written `--subject` drops that suffix and leaves a commit on
+  `main` that names no pull request.
 - Pass the body on its own: `infra/tool/merge/pr_merge.py --body-only --pr <n>
   --out <file>` writes what goes into `--body-file`, and `--show` without `--out`
   writes the whole message for reading. Handing the whole message to `--body-file`
