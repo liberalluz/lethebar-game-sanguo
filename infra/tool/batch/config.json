@@ -29,6 +29,15 @@
         "."
       ],
       "cwd": "."
+    },
+    {
+      "name": "pack-envelope",
+      "command": [
+        "python",
+        "infra/checks/check_pack.py",
+        "--self-test"
+      ],
+      "cwd": "."
     }
   ],
   "translate": [
