@@ -1,5 +1,10 @@
 # ADR-0001 · The card game is a layer over the world, not a second bundle
 
+Superseded by `ADR-0002` on 2026-11-07. `ADR-0014` forbids a mod from
+introducing a card, so the card game is a second pack of the world rather than a
+layer over the first. The reasoning below is kept as the record of a wrong turn,
+because the shape it chose is the one most people propose first.
+
 ## Context
 
 `packs/sanguo` ships one thing: a 24-turn campaign, `kind: bundle`, `requires: []`,
