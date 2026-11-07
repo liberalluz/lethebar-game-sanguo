@@ -28,7 +28,7 @@ Scopes: pick exactly one from the closed list below.
 | `pack` | A pack's content: `packs/*/manifest.json`, its `data/` and `assets/` |
 | `shared` | Material more than one pack uses: `shared/` |
 | `docs` | Specs, decisions, intent and runbooks under `docs/` |
-| `repo` | Repository conventions: `README`, `CONTRIBUTING`, `SECURITY`, `NOTICE`, `docs/specs/git-conventions.md`, `.gitignore` |
+| `repo` | Repository conventions and records: `README`, `CONTRIBUTING`, `SECURITY`, `NOTICE`, `CHANGELOG.md`, `docs/specs/git-conventions.md`, `.gitignore` |
 | `infra` | This repository's own tooling: `infra/checks/`, `infra/tool/` |
 
 - One scope per commit, no second level. `docs(srs)` is not allowed; write
@@ -106,6 +106,11 @@ Scopes: pick exactly one from the closed list below.
 - One release, two files: `<id>.zip` and `<id>-X.Y.Z.json`, attached to the same
   release. The descriptor carries the sha256 of the zip, which is the only thing a
   reader can check the download against.
-- Release notes are folded from `changelog.d/` when the release is cut. This
-  repository has no `CHANGELOG.md`, so no tag can be held against one.
+- Two records are written at a release, and neither is hand-counted.
+  `CHANGELOG.md` is the merged record: `python infra/tool/release/release.py
+  --root . --write --version vX.Y.Z --date YYYY-MM-DD` folds every fragment in
+  `changelog.d/` into one section and deletes only the fragments it consumed.
+  The release body is written for a player instead — what this version is, how
+  to install it, what the hash is — and it ships in both languages, English
+  first, the Chinese after it. A release with only one of the two is not done.
 - A tag is not moved once it is pushed.
