@@ -29,15 +29,6 @@
         "."
       ],
       "cwd": "."
-    },
-    {
-      "name": "release-tool",
-      "command": [
-        "python",
-        "infra/tool/release/pack.py",
-        "self-test"
-      ],
-      "cwd": "."
     }
   ],
   "translate": [],
