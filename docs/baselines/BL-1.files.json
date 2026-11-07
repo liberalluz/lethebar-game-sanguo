@@ -1,0 +1,11 @@
+{
+  "algorithm": "sha256",
+  "baseline": "BL-1",
+  "files": {
+    "docs/specs/controlled/SDD.md": "433896649d88d96dd7fd8d808d881c475d1d3c2180c8d554eafce5c9d47a2bec",
+    "docs/specs/controlled/SDD.zh-CN.md": "35a290f2734a874b813dfe9030b90630d793343cd26d5bca9b01d9f0906bf939",
+    "docs/specs/controlled/SRS.md": "e1b254a56a4261765bbc14d72b543c97db55d4ba78eb855c2ab4165e3bc61041",
+    "docs/specs/controlled/SRS.zh-CN.md": "8e326cce377110249f6cdc37d7b1651e10e56351238231ff7b946c1650100468"
+  },
+  "version": 1
+}
