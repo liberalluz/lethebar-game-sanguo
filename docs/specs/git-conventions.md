@@ -112,7 +112,10 @@ Scopes: pick exactly one from the closed list below.
   `changelog.d/` into one section and deletes only the fragments it consumed.
   The release body is written for a player instead — what this version is, how
   to install it, what the hash is — and it is written in the source language,
-  English. Translations are not published on the release: they live outside this
-  repository, in `lethebar-game-sanguo-docs` under
-  `records/<YYYY-MM>-release-vX.Y.Z/`（仓外，需另行检出）.
+  English. It is drafted outside this repository, in `lethebar-game-sanguo-docs`
+  under `product/release-notes/<pack>-vX.Y.Z.en.md`, with the translation beside
+  it as `<pack>-vX.Y.Z.md`（仓外，需另行检出）. What a release leaves behind is a
+  frozen copy of that English file plus a release record — tag, both commit
+  hashes, provider, body source, pack sha256 — in
+  `records/<YYYY-MM>-release-<pack>-vX.Y.Z/`.
 - A tag is not moved once it is pushed.
