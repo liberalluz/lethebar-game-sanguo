@@ -38,6 +38,13 @@
         "--self-test"
       ],
       "cwd": "."
+    },
+    {
+      "name": "translation",
+      "command": [
+        "python",
+        "infra/checks/check_translation.py"
+      ]
     }
   ],
   "translate": [
