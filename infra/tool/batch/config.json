@@ -1,0 +1,46 @@
+{
+  "base": "main",
+  "branch_prefix": "batch/",
+  "docs_root": "",
+  "scope": {
+    "ignore": [
+      "dist/**",
+      ".batch/**"
+    ],
+    "generated": [
+      "dist/**"
+    ]
+  },
+  "checks": [
+    {
+      "name": "commit-body",
+      "command": [
+        "python",
+        "infra/checks/check_commit_body.py"
+      ],
+      "cwd": "."
+    },
+    {
+      "name": "language",
+      "command": [
+        "python",
+        ".agents/skills/nebula-bootstrap/scripts/check_language.py",
+        "--root",
+        "."
+      ],
+      "cwd": "."
+    },
+    {
+      "name": "release-tool",
+      "command": [
+        "python",
+        "infra/tool/release/pack.py",
+        "self-test"
+      ],
+      "cwd": "."
+    }
+  ],
+  "translate": [],
+  "pr_create": [],
+  "merge": []
+}
