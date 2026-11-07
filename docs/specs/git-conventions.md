@@ -27,12 +27,13 @@ Scopes: pick exactly one from the closed list below.
 |---|---|
 | `pack` | A pack's content: `packs/*/manifest.json`, its `data/` and `assets/` |
 | `shared` | Material more than one pack uses: `shared/` |
-| `docs` | Specs, decisions, intent and runbooks under `docs/` |
+| `docs` | Everything under `docs/`: specs, decisions, baselines, intent, runbooks |
 | `repo` | Repository conventions and records: `README`, `CONTRIBUTING`, `SECURITY`, `NOTICE`, `CHANGELOG.md`, `docs/specs/git-conventions.md`, `.gitignore` |
-| `infra` | This repository's own tooling: `infra/checks/`, `infra/tool/` |
+| `infra` | Checks and tools written here: `infra/checks/`, our own scripts under `infra/tool/` |
+| `tools` | Tooling copied from the engine or Nebula: `infra/tool/batch/`, `infra/tool/release/`, `infra/tool/merge/` |
 
-- One scope per commit, no second level. `docs(srs)` is not allowed; write
-  `docs(docs): add a decision record`.
+- One scope per commit, no second level. A folder is a place, not a scope: a
+  change under `docs/decisions/` is `docs`, not `docs(decisions)`.
 - The scope follows what the change is about, not where the file sits:
   `git-conventions.md` lives in `docs/` but its changes are `repo`.
 - Adding a scope means editing this table first, in the same pull request as its
@@ -99,23 +100,39 @@ Scopes: pick exactly one from the closed list below.
 
 ## 5. Release
 
-- Version lives in the pack's manifest, `packs/<id>/manifest.json`; the tag and the
-  published files are derived from it.
-- Tag: `pack/<id>/vX.Y.Z`. The `v` appears only in the tag, so the descriptor and
-  the manifest both say `"version": "X.Y.Z"`.
-- One release, two files: `<id>.zip` and `<id>-X.Y.Z.json`, attached to the same
-  release. The descriptor carries the sha256 of the zip, which is the only thing a
-  reader can check the download against.
-- Two records are written at a release, and neither is hand-counted.
-  `CHANGELOG.md` is the merged record: `python infra/tool/release/release.py
-  --root . --write --version vX.Y.Z --date YYYY-MM-DD` folds every fragment in
-  `changelog.d/` into one section and deletes only the fragments it consumed.
-  The release body is written for a player instead — what this version is, how
-  to install it, what the hash is — and it is written in the source language,
-  English. It is drafted outside this repository, in `lethebar-game-sanguo-docs`
-  under `product/release-notes/<pack>-vX.Y.Z.en.md`, with the translation beside
-  it as `<pack>-vX.Y.Z.md`（仓外，需另行检出）. What a release leaves behind is a
-  frozen copy of that English file plus a release record — tag, both commit
-  hashes, provider, body source, pack sha256 — in
-  `records/<YYYY-MM>-release-<pack>-vX.Y.Z/`.
+Two things carry a version here, and each has its own line in `CHANGELOG.md`.
+
+- **The pack.** The version lives in `packs/<id>/manifest.json`; the tag is
+  `pack/<id>/vX.Y.Z`; the release carries `<id>.zip` and `<id>-X.Y.Z.json`; the
+  changelog section is `## <id> vX.Y.Z`. The descriptor carries the sha256 of the
+  zip, which is the only thing a reader can check the download against.
+- **The repository.** There is no version file: the tag is the version. Tag
+  `repo/vX.Y.Z`, annotated, on `main`, with no artifact and no GitHub Release;
+  the changelog section is `## repo vX.Y.Z`. Start at `0.1.0` and promise no
+  compatibility: patch fixes a check, minor adds one, major only when the layout
+  changes.
+
+Both sections are composed the same way, and never hand-counted:
+`python infra/tool/release/release.py --root . --write --stream <stream>
+--version vX.Y.Z --date YYYY-MM-DD` folds every fragment in `changelog.d/` into
+one section and deletes only the fragments it consumed. Without `--stream` the
+heading is the version alone, which is what `## v1.0.0` used before the split.
+
+The release body is written for a player instead — what this version is, how to
+install it, what the hash is — in English, the source language, and drafted
+outside this repository in `lethebar-game-sanguo-docs`, under
+`product/release-notes/<pack>-vX.Y.Z.en.md`, with the translation beside it as
+`<pack>-vX.Y.Z.md`（仓外，需另行检出）. What a release leaves behind is a frozen
+copy of that English file plus a release record — tag, both commit hashes,
+provider, body source, pack sha256 — in
+`records/<YYYY-MM>-release-<pack>-vX.Y.Z/`.
+
+Before a pack is published, `infra/tool/release/preflight.py` runs six checks
+against the manifest, the artifact, the descriptor and the release itself,
+including one real fetch of the asset. It is run after the release exists and
+before the files are uploaded: the fifth check is expected to fail until then,
+and that failure is the reason to keep the order.
+
+The whole path, in the order it is run, is in `docs/runbooks/release.md`.
+
 - A tag is not moved once it is pushed.

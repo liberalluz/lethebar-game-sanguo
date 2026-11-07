@@ -6,6 +6,11 @@ Usage:
     python infra/tool/release/release.py --root . --check
     python infra/tool/release/release.py --root . --render --version v1.2.3
     python infra/tool/release/release.py --root . --write --version v1.2.3
+    python infra/tool/release/release.py --root . --write --stream repo --version v0.1.0
+
+`--stream` names the thing that version counts, so a repository that ships a
+package and also keeps tooling can give each its own line: `pack` and `repo`.
+Without it the heading is the version alone, which is what 1.0.0 used.
 
 `--write` updates CHANGELOG.md and removes only the fragments it consumed.
 `--render` prints the section without changing anything. Default is `--check`.
@@ -29,6 +34,7 @@ SECTIONS = ("Added", "Changed", "Fixed", "Removed")
 VERSION_RE = re.compile(r"^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$")
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 SECTION_RE = re.compile(r"^### (Added|Changed|Fixed|Removed)\s*$")
+STREAM_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 H2_RE = re.compile(r"^##\s")
 
 
@@ -127,10 +133,16 @@ def validate_date(value: str) -> None:
         raise ReleaseError(f"invalid date: {value!r}") from exc
 
 
-def compose(notes: dict[str, list[str]], version: str, day: str) -> str:
+def heading_for(stream: str, version: str) -> str:
+    if stream and not STREAM_RE.match(stream):
+        raise ReleaseError(f"stream must look like pack or repo, got {stream!r}")
+    return f"## {stream} {version}".strip()
+
+
+def compose(notes: dict[str, list[str]], version: str, day: str, stream: str = "") -> str:
     validate_version(version)
     validate_date(day)
-    lines = [f"## {version} - {day}", ""]
+    lines = [f"{heading_for(stream, version)} - {day}", ""]
     for section in SECTIONS:
         if not notes[section]:
             continue
@@ -164,12 +176,12 @@ def _strip_empty_unreleased(lines: list[str]) -> list[str]:
     return lines[:index] + lines[end:]
 
 
-def insert_version(text: str, section: str, version: str) -> str:
+def insert_version(text: str, section: str, heading: str) -> str:
     lines = text.splitlines()
     if lines and lines[0].strip() != "# Changelog":
         raise ReleaseError("CHANGELOG.md must start with '# Changelog'")
-    if any(line.strip().startswith(f"## {version}") for line in lines):
-        raise ReleaseError(f"CHANGELOG.md already has {version}")
+    if any(line.strip().startswith(heading) for line in lines):
+        raise ReleaseError(f"CHANGELOG.md already has {heading.lstrip('# ').strip()}")
     lines = _strip_empty_unreleased(lines)
 
     index = next((i for i, line in enumerate(lines) if H2_RE.match(line)), None)
@@ -185,18 +197,19 @@ def insert_version(text: str, section: str, version: str) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def write_release(root: Path, version: str, day: str) -> tuple[str, int]:
+def write_release(root: Path, version: str, day: str, stream: str = "") -> tuple[str, int]:
     notes, paths = collect(root)
     validate_version(version)
     validate_date(day)
-    section = compose(notes, version, day)
+    section = compose(notes, version, day, stream)
+    heading = heading_for(stream, version)
 
     changelog = root / CHANGELOG
     if changelog.is_file():
         text = read_text(changelog)
     else:
         text = "# Changelog\n"
-    updated = insert_version(text, section, version)
+    updated = insert_version(text, section, heading)
     changelog.write_text(updated, encoding="utf-8", newline="\n")
     for path in paths:
         path.unlink()
@@ -211,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--render", action="store_true")
     group.add_argument("--write", action="store_true")
     parser.add_argument("--version", default="")
+    parser.add_argument("--stream", default="", help="what the version counts: pack, repo")
     parser.add_argument("--tool-version", action="store_true", help="print the tool version and exit")
     parser.add_argument("--date", default=date.today().isoformat())
     args = parser.parse_args(argv)
@@ -227,11 +241,11 @@ def main(argv: list[str] | None = None) -> int:
             validate_version(args.version)
             validate_date(args.date)
             notes, _ = collect(root)
-            section = compose(notes, args.version, args.date)
+            section = compose(notes, args.version, args.date, args.stream)
             if args.render:
                 sys.stdout.write(section)
                 return 0
-            _, count = write_release(root, args.version, args.date)
+            _, count = write_release(root, args.version, args.date, args.stream)
             print(f"release: wrote {CHANGELOG} and removed {count} fragment(s)")
             return 0
 
@@ -239,7 +253,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.version:
             validate_version(args.version)
             text = read_text(root / CHANGELOG) if (root / CHANGELOG).is_file() else ""
-            if any(line.strip().startswith(f"## {args.version}") for line in text.splitlines()):
+            heading = heading_for(args.stream, args.version)
+            if any(line.strip().startswith(heading) for line in text.splitlines()):
                 raise ReleaseError(f"CHANGELOG.md already has {args.version}")
         total = sum(len(items) for items in notes.values())
         print(f"release: {len(paths)} fragment(s), {total} note(s), all valid")
