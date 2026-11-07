@@ -99,7 +99,13 @@ Scopes: pick exactly one from the closed list below.
 
 ## 5. Release
 
-- Version lives in the declared manifest.
-- Tag: `vX.Y.Z`.
-- `CHANGELOG.md` must have the matching version before tagging.
-- Content packs use `pack/<space>/vX.Y.Z` when tagged.
+- Version lives in the pack's manifest, `packs/<id>/manifest.json`; the tag and the
+  published files are derived from it.
+- Tag: `pack/<id>/vX.Y.Z`. The `v` appears only in the tag, so the descriptor and
+  the manifest both say `"version": "X.Y.Z"`.
+- One release, two files: `<id>.zip` and `<id>-X.Y.Z.json`, attached to the same
+  release. The descriptor carries the sha256 of the zip, which is the only thing a
+  reader can check the download against.
+- Release notes are folded from `changelog.d/` when the release is cut. This
+  repository has no `CHANGELOG.md`, so no tag can be held against one.
+- A tag is not moved once it is pushed.
