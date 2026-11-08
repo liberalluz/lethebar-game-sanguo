@@ -1,0 +1,21 @@
+{
+  "actions": [
+    {
+      "id": "levy",
+      "label": "摊派",
+      "hint": "向豪强摊派军资，金帛增，声望减。",
+      "costs": {
+        "standing": {
+          "add": -1
+        }
+      },
+      "effects": [
+        {
+          "coin": {
+            "add": 8
+          }
+        }
+      ]
+    }
+  ]
+}
