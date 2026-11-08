@@ -58,5 +58,16 @@
     "{out}"
   ],
   "pr_create": [],
-  "merge": []
+  "merge": [],
+  "release_checks": [
+    {
+      "name": "release-tool",
+      "command": [
+        "python",
+        "infra/tool/release/pack.py",
+        "self-test"
+      ],
+      "cwd": "."
+    }
+  ]
 }

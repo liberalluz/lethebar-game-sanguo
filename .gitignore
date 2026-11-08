@@ -47,6 +47,7 @@ __pycache__/
 # Nebula installation artifacts
 # Batch execution state
 .batch/
+.test-tmp/
 
 # IDE
 .idea/

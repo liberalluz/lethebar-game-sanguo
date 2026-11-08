@@ -1,21 +1,13 @@
 {
   "project": "lethebar-game-sanguo",
-  "stack": "godot",
-  "platforms": [
-    "browser",
-    "ios"
-  ],
+  "stack": "data",
   "components": [
     {
       "name": "world",
-      "stack": "godot",
+      "stack": "data",
       "dirs": [
         "shared",
         "packs"
-      ],
-      "platforms": [
-        "browser",
-        "ios"
       ]
     }
   ],
@@ -55,5 +47,29 @@
       "allowDeletions": false
     }
   },
-  "created_at": "2026-11-07T06:45:48.433440+00:00"
+  "created_at": "2026-11-07T06:45:48.433440+00:00",
+  "git": {
+    "convention": "team",
+    "types": [
+      "feat",
+      "fix",
+      "docs",
+      "test",
+      "refactor",
+      "chore",
+      "ci"
+    ],
+    "scopes": [
+      "pack",
+      "shared",
+      "docs",
+      "repo",
+      "infra",
+      "tools"
+    ],
+    "body": [
+      "Why:",
+      "Batch:"
+    ]
+  }
 }

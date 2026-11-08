@@ -76,6 +76,10 @@ Scopes: pick exactly one from the closed list below.
 
 - One PR = one behavior.
 - Fill the PR template.
+- A batch body is the author's file, not a generated one:
+  `batch.py pr <id> --prepare --body-from .batch/<id>/pr-body.source.md` copies it
+  byte for byte. A generated body is a stand-in — the five sections are questions
+  a generator cannot answer, which is why the engine deleted that path in `#104`.
 - Link the issue or record if one exists.
 - Required checks must be green.
 - Do not rewrite history after review unless asked.

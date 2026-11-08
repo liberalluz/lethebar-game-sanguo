@@ -20,6 +20,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -35,7 +36,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "branch_prefix": "batch/",
     "docs_root": "",
     "scope": {"ignore": [], "generated": []},
+    "commit": {
+        "types": [],
+        "scopes": [],
+        "body": [],
+    },
     "checks": [],
+    "release_checks": [],
     "pr_create": [],
     "translate": [],
     "merge": [],
@@ -45,12 +52,23 @@ DATED_ID_RE = re.compile(r"^[0-9]{8}-[0-9a-f]{6}$")
 CARD_ID_RE = re.compile(r"^B[0-9]+[a-z]?$")
 CARD_MARKER_RE = re.compile(r"<!--\s*batch-card\s*:\s*v1\s*-->")
 CARD_JSON_RE = re.compile(r"```json[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
-CARD_TYPES = {"feat", "fix", "docs", "test", "refactor", "chore", "ci"}
+PLAN_MARKER_RE = re.compile(
+    r"<!--\s*planned\s*:\s*(?P<id>[A-Za-z0-9-]+)\s+(?P<hash>[0-9a-f]{8,64})\s+(?P<day>\d{4}-\d{2}-\d{2})\s*-->"
+)
+CARD_TYPES = {"feat", "fix", "process", "docs"}
+BUDGET_DEFAULTS = {"docs": 150, "fix": 200, "process": 200, "feat": 400}
+DEFAULT_BUDGET = 400
+COMMIT_TYPES = ("feat", "fix", "docs", "test", "refactor", "chore", "ci")
+COMMIT_SUBJECT_RE = re.compile(
+    r"^(?P<type>[a-z]+)(?:\((?P<scope>[^)]+)\))?: (?P<subject>.+)$"
+)
 DOCS_PROCESS = "process"
 DOCS_SDP = "sdp.md"
 DOCS_BATCHES = "batches"
 DOCS_RECORDS = "records"
 RECORD_ID_RE = re.compile(r"(?<![A-Za-z0-9])B[0-9]+[a-z]?(?![A-Za-z0-9])")
+ARCHIVE_DIR = "archive"
+PAUSABLE_STATUSES = {"started", "checked", "check_failed"}
 STAGE_SKILLS = {
     "nebula-project",
     "nebula-bootstrap",
@@ -119,6 +137,27 @@ def resolve_commit(root: Path, ref: str) -> str:
     return out if code == 0 else ""
 
 
+def budget_anchor(root: Path, base: str, base_ref: str | None) -> str:
+    """Return the commit to diff against when counting scope and budget.
+
+    ``base`` is the branch point recorded when the batch started. If main moved
+    on afterwards and the branch was cut from the newer commit, diffing against
+    the old base would count the other PR's lines again. Prefer the merge base
+    with the current base branch, and fall back to the recorded commit.
+    """
+    head = resolve_commit(root, "HEAD")
+    ref = resolve_commit(root, base_ref) if base_ref else ""
+    if head and ref and ref != head:
+        code, out, _ = run_git(root, ["merge-base", head, ref])
+        if code == 0 and out:
+            return out.splitlines()[0]
+    if head:
+        code, out, _ = run_git(root, ["merge-base", head, base])
+        if code == 0 and out:
+            return out.splitlines()[0]
+    return base
+
+
 def config_path(root: Path) -> Path:
     return root / CONFIG_REL
 
@@ -126,6 +165,7 @@ def config_path(root: Path) -> Path:
 def load_config(root: Path) -> dict[str, Any]:
     config = dict(DEFAULT_CONFIG)
     config["scope"] = dict(DEFAULT_CONFIG["scope"])
+    config["commit"] = dict(DEFAULT_CONFIG["commit"])
     raw = load_json(config_path(root))
     if raw is not None:
         for key in DEFAULT_CONFIG:
@@ -142,11 +182,45 @@ def load_config(root: Path) -> dict[str, Any]:
         config["scope"][key] = [str(item) for item in value]
     if not isinstance(config.get("checks"), list):
         raise SystemExit("config.checks must be a list")
+    if not isinstance(config.get("release_checks"), list):
+        raise SystemExit("config.release_checks must be a list")
+    commit = config.get("commit")
+    if not isinstance(commit, dict):
+        raise SystemExit("config.commit must be an object")
+    for key in ("types", "scopes", "body"):
+        value = commit.get(key, [])
+        if not isinstance(value, list):
+            raise SystemExit(f"config.commit.{key} must be a list")
     for key in ("pr_create", "translate", "merge"):
         value = config.get(key)
         if value and not isinstance(value, list):
             raise SystemExit(f"config.{key} must be a command array")
     return config
+
+
+def scaffold_git(root: Path) -> dict[str, Any]:
+    """Read the optional ``git`` preset written by bootstrap."""
+    data = load_json(root / SCAFFOLD_REL) or {}
+    block = data.get("git")
+    return block if isinstance(block, dict) else {}
+
+
+def commit_rule(root: Path, config: dict[str, Any]) -> dict[str, Any]:
+    """Merge ``config.commit`` over the scaffold preset.
+
+    An empty rule means "not configured": nothing is checked.
+    """
+    preset = scaffold_git(root)
+    own = config.get("commit") or {}
+    types = [str(item) for item in (own.get("types") or preset.get("types") or [])]
+    scopes = [str(item) for item in (own.get("scopes") or preset.get("scopes") or [])]
+    body = [str(item) for item in (own.get("body") or preset.get("body") or [])]
+    return {
+        "types": types,
+        "scopes": scopes,
+        "body": body,
+        "enabled": bool(types or scopes or body),
+    }
 
 
 def state_root(root: Path) -> Path:
@@ -178,6 +252,50 @@ def set_active(root: Path, batch_id: str) -> None:
     write_text(state_root(root) / "active", batch_id + "\n")
 
 
+def current_branch(root: Path) -> str:
+    code, out, _ = run_git(root, ["branch", "--show-current"])
+    return out if code == 0 else ""
+
+
+def branch_exists(root: Path, branch: str) -> bool:
+    if not branch:
+        return False
+    code, _, _ = run_git(
+        root, ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"]
+    )
+    return code == 0
+
+
+def batch_branch_mismatch(root: Path, state: dict[str, Any], batch_id: str) -> str | None:
+    """Explain why HEAD is not on the branch recorded when the batch started."""
+    if state.get("branch_created") is not True:
+        return None
+    branch = str(state.get("branch") or "")
+    if not branch:
+        return None
+    here = current_branch(root)
+    if here == branch:
+        return None
+    return (
+        f"batch {batch_id} is on branch {branch}, but HEAD is on "
+        f"{here or 'a detached HEAD'}; run: git switch {branch}"
+    )
+
+
+def archive_aborted(root: Path, batch_id: str) -> bool:
+    """Move an aborted batch aside so the same id can be planned again."""
+    target = batch_dir(root, batch_id)
+    state = load_json(target / "state.json") or {}
+    if state.get("status") != "aborted":
+        return False
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    archive = state_root(root) / ARCHIVE_DIR / f"{batch_id}-{stamp}"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(target), str(archive))
+    print(f"archived aborted batch {batch_id} to .batch/{ARCHIVE_DIR}/{archive.name}")
+    return True
+
+
 def resolve_id(root: Path, value: str | None) -> str:
     if value:
         if not ID_RE.fullmatch(value):
@@ -191,7 +309,11 @@ def resolve_id(root: Path, value: str | None) -> str:
     if not state_root(root).is_dir():
         raise SystemExit("no batch found; run 'plan' first")
     candidates = sorted(
-        (path.name for path in state_root(root).iterdir() if path.is_dir()),
+        (
+            path.name
+            for path in state_root(root).iterdir()
+            if path.is_dir() and ID_RE.fullmatch(path.name)
+        ),
         key=batch_sort_key,
     )
     if not candidates:
@@ -252,8 +374,51 @@ def source_relative(root: Path, path: Path) -> str:
     return Path(os.path.relpath(path, root)).as_posix()
 
 
+def inside_project(root: Path, path: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def source_card_hash(path: Path) -> str:
+    """Hash a card source, ignoring the ``planned`` marker line."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    clean = PLAN_MARKER_RE.sub("", text).rstrip()
+    return hashlib.sha256(clean.encode("utf-8")).hexdigest()
+
+
+def source_hashes(path: Path) -> set[str]:
+    raw = path.read_bytes()
+    text = path.read_text(encoding="utf-8", errors="replace")
+    clean = PLAN_MARKER_RE.sub("", text).rstrip()
+    return {
+        hashlib.sha256(raw).hexdigest(),
+        hashlib.sha256(clean.encode("utf-8")).hexdigest(),
+    }
+
+
+def plan_marker_hash(path: Path, batch_id: str) -> str | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, UnicodeDecodeError):
+        return None
+    for match in PLAN_MARKER_RE.finditer(text):
+        if match.group("id") == batch_id:
+            return match.group("hash")
+    return None
+
+
+def write_plan_marker(path: Path, batch_id: str, digest: str, day: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    text = PLAN_MARKER_RE.sub("", text).rstrip() + "\n"
+    text += f"<!-- planned: {batch_id} {digest[:8]} {day} -->\n"
+    path.write_text(text, encoding="utf-8", newline="\n")
 
 
 def card_source_path(root: Path, card: dict[str, Any]) -> Path | None:
@@ -272,12 +437,14 @@ def source_is_current(root: Path, card: dict[str, Any]) -> tuple[bool, str]:
     if not path.is_file():
         return False, f"card source is missing: {card.get('source')}"
     expected = str(card.get("source_sha256", ""))
-    if file_sha256(path) != expected:
+    if expected not in source_hashes(path):
         return False, "card source changed; re-plan and re-approve"
     return True, ""
 
 
-def validate_planned_card(card: dict[str, Any], path: Path | None = None) -> None:
+def validate_planned_card(
+    card: dict[str, Any], path: Path | None = None, types: set[str] | None = None
+) -> None:
     def fail(message: str) -> None:
         raise ValueError(message)
 
@@ -290,7 +457,6 @@ def validate_planned_card(card: dict[str, Any], path: Path | None = None) -> Non
         "goal",
         "type",
         "base",
-        "size_budget",
         "allowed",
         "acceptance",
         "changelog",
@@ -308,15 +474,28 @@ def validate_planned_card(card: dict[str, Any], path: Path | None = None) -> Non
 
     if not isinstance(card.get("goal"), str) or not card["goal"].strip():
         fail("goal must be a non-empty string")
-    if card.get("type") not in CARD_TYPES:
-        fail("type must be feat, fix, process, or docs")
+    if "pr_title" in card:
+        pr_title = card.get("pr_title")
+        if not isinstance(pr_title, str) or not pr_title.strip():
+            fail("pr_title must be a non-empty string")
+        if "\n" in pr_title or "\r" in pr_title:
+            fail("pr_title must be a single line")
+    allowed = types or CARD_TYPES
+    if card.get("type") not in allowed:
+        fail(f"type must be one of: {', '.join(sorted(allowed))}")
     base = card.get("base")
     if not isinstance(base, str) or not base.strip() or any(ch.isspace() for ch in base):
         fail("base must be a non-empty branch name")
 
-    budget = card.get("size_budget")
-    if type(budget) is not int or budget < 1:
-        fail("size_budget must be an integer greater than zero")
+    if "size_budget" in card:
+        budget = card.get("size_budget")
+        if type(budget) is not int or budget < 1:
+            fail("size_budget must be an integer greater than zero")
+    else:
+        card["size_budget"] = BUDGET_DEFAULTS.get(str(card.get("type")), DEFAULT_BUDGET)
+        card["size_budget_default"] = True
+    if "release" in card and not isinstance(card["release"], bool):
+        fail("release must be a boolean")
 
     for key, allow_empty in (("allowed", False), ("forbidden", True)):
         if key not in card and key == "forbidden":
@@ -355,7 +534,9 @@ def validate_planned_card(card: dict[str, Any], path: Path | None = None) -> Non
             fail(f"skill {skill_id}: reason must be a string")
 
 
-def read_planned_card(path: Path) -> tuple[dict[str, Any], bytes]:
+def read_planned_card(
+    path: Path, types: set[str] | None = None
+) -> tuple[dict[str, Any], bytes]:
     data = path.read_bytes()
     try:
         text = data.decode("utf-8")
@@ -371,7 +552,7 @@ def read_planned_card(path: Path) -> tuple[dict[str, Any], bytes]:
         card = json.loads(block.group(1))
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid card JSON: {exc}") from exc
-    validate_planned_card(card, path)
+    validate_planned_card(card, path, types)
     return card, data
 
 
@@ -498,11 +679,10 @@ def matches(path: str, patterns: Sequence[str]) -> bool:
     return any(glob_regex(pattern).fullmatch(normalized) for pattern in patterns)
 
 
-def changed_paths(root: Path, base: str, config: dict[str, Any]) -> list[str]:
+def changed_paths(root: Path, anchor: str, config: dict[str, Any]) -> list[str]:
     paths: set[str] = set()
     for args in (
-        ["diff", "--name-only", f"{base}...HEAD"],
-        ["diff", "--name-only", "HEAD"],
+        ["diff", "--name-only", anchor],
         ["ls-files", "--others", "--exclude-standard"],
     ):
         code, out, _ = run_git(root, args)
@@ -525,11 +705,11 @@ def changed_paths(root: Path, base: str, config: dict[str, Any]) -> list[str]:
 
 
 def check_scope(
-    root: Path, card: dict[str, Any], base: str, config: dict[str, Any]
+    root: Path, card: dict[str, Any], anchor: str, config: dict[str, Any]
 ) -> tuple[list[str], list[str]]:
     allowed = [str(item) for item in card.get("allowed", [])] or ["**"]
     forbidden = [str(item) for item in card.get("forbidden", [])]
-    changed = changed_paths(root, base, config)
+    changed = changed_paths(root, anchor, config)
     violations: list[str] = []
     for path in changed:
         if matches(path, forbidden):
@@ -560,10 +740,107 @@ def check_skills(root: Path, card: dict[str, Any]) -> tuple[list[str], dict[str,
     return violations, found
 
 
+SKILL_EVIDENCE_DIR = Path("evidence") / "skills"
+SKILL_EVIDENCE_STATUSES = {"applied", "partial", "skipped"}
+VAGUE_CHANGE = {
+    "applied",
+    "used",
+    "read",
+    "loaded",
+    "yes",
+    "no",
+    "n/a",
+    "na",
+    "none",
+    "-",
+    "skill applied",
+    "used the skill",
+    "read the skill",
+    "loaded the skill",
+}
+
+
+def skill_evidence_path(root: Path, batch_id: str, skill_id: str) -> Path:
+    return batch_dir(root, batch_id) / SKILL_EVIDENCE_DIR / f"{skill_id}.md"
+
+
+def read_skill_evidence(path: Path) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return fields
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        fields[key.strip().lower()] = value.strip()
+    return fields
+
+
+def proof_looks_like_path(proof: str) -> bool:
+    if proof.startswith(("http://", "https://")):
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9_./-]+(?::[0-9]+)?", proof):
+        return False
+    return "/" in proof or "." in proof
+
+
+def check_skill_evidence(
+    root: Path, batch_id: str, card: dict[str, Any]
+) -> tuple[list[str], list[str], dict[str, dict[str, Any]]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    records: dict[str, dict[str, Any]] = {}
+    for item in card.get("skills", []):
+        skill_id = str(item.get("id", ""))
+        required = bool(item.get("required"))
+        path = skill_evidence_path(root, batch_id, skill_id)
+        relative = source_relative(root, path)
+        if not path.is_file():
+            if required:
+                errors.append(
+                    f"skill {skill_id}: missing evidence file {relative} "
+                    "(status, changed, proof)"
+                )
+            continue
+        fields = read_skill_evidence(path)
+        status = fields.get("status", "").lower()
+        changed = fields.get("changed", "")
+        proof = fields.get("proof", "")
+        if status not in SKILL_EVIDENCE_STATUSES:
+            errors.append(
+                f"skill {skill_id}: evidence status must be applied, partial, or skipped"
+            )
+        if not changed or changed.strip().lower() in VAGUE_CHANGE:
+            errors.append(
+                f"skill {skill_id}: 'changed' must say what changed, "
+                "not repeat the status"
+            )
+        elif len(changed) < 12:
+            warnings.append(f"skill {skill_id}: 'changed' is very short")
+        if not proof:
+            errors.append(f"skill {skill_id}: 'proof' is empty")
+        elif proof_looks_like_path(proof):
+            target = proof.split(":", 1)[0]
+            if not (root / target).exists():
+                errors.append(f"skill {skill_id}: proof path does not exist: {proof}")
+        if required and status == "skipped":
+            errors.append(f"skill {skill_id}: a required skill cannot be skipped")
+        records[skill_id] = {
+            "status": status,
+            "changed": changed,
+            "proof": proof,
+            "required": required,
+            "file": relative,
+        }
+    return errors, warnings, records
+
+
 def diff_stats(
-    root: Path, base: str, changed: Sequence[str]
+    root: Path, anchor: str, changed: Sequence[str]
 ) -> tuple[int, int, int]:
-    code, out, err = run_git(root, ["diff", "--numstat", "--no-renames", base])
+    code, out, err = run_git(root, ["diff", "--numstat", "--no-renames", anchor])
     if code != 0:
         raise SystemExit(f"could not count batch diff: {err}")
     allowed = set(changed)
@@ -601,12 +878,12 @@ def diff_stats(
 
 
 def check_budget(
-    root: Path, card: dict[str, Any], base: str, changed: Sequence[str]
+    root: Path, card: dict[str, Any], anchor: str, changed: Sequence[str]
 ) -> tuple[int, int, int, str | None]:
     budget = card.get("size_budget")
     if type(budget) is not int or budget < 1:
         return 0, 0, 0, None
-    added, deleted, binary = diff_stats(root, base, changed)
+    added, deleted, binary = diff_stats(root, anchor, changed)
     total = added + deleted
     if total > budget:
         message = f"budget: {total} changed lines exceeds {budget}"
@@ -614,6 +891,88 @@ def check_budget(
             message += f" ({binary} binary file(s) not counted)"
         return added, deleted, binary, message
     return added, deleted, binary, None
+
+
+def commit_subjects(root: Path, anchor: str) -> list[tuple[str, str, str]]:
+    """Return (short sha, subject, body) for the commits this branch adds."""
+    code, out, _ = run_git(
+        root,
+        ["log", "--no-merges", "--format=%h%x1f%s%x1f%b%x1e", f"{anchor}..HEAD"],
+    )
+    if code != 0:
+        return []
+    rows = []
+    for record in out.split("\x1e"):
+        line = record.strip("\n")
+        if not line:
+            continue
+        sha, _, rest = line.partition("\x1f")
+        subject, _, body = rest.partition("\x1f")
+        if sha:
+            rows.append((sha, subject, body))
+    return rows
+
+
+def subject_problems(
+    rule: dict[str, Any], sha: str, subject: str, body: str
+) -> list[str]:
+    """Return every complaint about one commit message."""
+    problems: list[str] = []
+    match = COMMIT_SUBJECT_RE.match(subject)
+    if not match:
+        return [f"{sha}: subject must read type(scope): subject: {subject}"]
+    kind = match.group("type")
+    scope = match.group("scope")
+    if rule["types"] and kind not in rule["types"]:
+        problems.append(
+            f"{sha}: type '{kind}' is not one of: {', '.join(rule['types'])}"
+        )
+    if rule["scopes"] and not scope:
+        problems.append(
+            f"{sha}: missing scope; choose one of: {', '.join(rule['scopes'])}"
+        )
+    if scope and rule["scopes"] and scope not in rule["scopes"]:
+        problems.append(
+            f"{sha}: scope '{scope}' is not one of: {', '.join(rule['scopes'])}"
+        )
+    missing = [token for token in rule["body"] if token not in body]
+    if missing:
+        problems.append(
+            f"{sha}: commit body must contain {', '.join(missing)} "
+            f"(write 'Batch: none' when there is no batch)"
+        )
+    return problems
+
+
+def check_commit_titles(
+    root: Path, anchor: str, config: dict[str, Any]
+) -> list[str]:
+    """Check every commit the branch adds against the configured rule."""
+    rule = commit_rule(root, config)
+    if not rule["enabled"]:
+        return []
+    problems: list[str] = []
+    for sha, subject, body in commit_subjects(root, anchor):
+        problems.extend(subject_problems(rule, sha, subject, body))
+    return problems
+
+
+def check_merged_commit(root: Path, config: dict[str, Any]) -> list[str]:
+    """Check the squash commit that just landed on the base branch.
+
+    This runs after the merge, so it can only report; it never blocks.
+    """
+    rule = commit_rule(root, config)
+    if not rule["enabled"]:
+        return []
+    code, out, _ = run_git(
+        root, ["log", "-1", "--format=%h%x1f%s%x1f%b"]
+    )
+    if code != 0 or not out.strip():
+        return []
+    sha, _, rest = out.partition("\x1f")
+    subject, _, body = rest.partition("\x1f")
+    return subject_problems(rule, sha, subject, body)
 
 
 def check_changelog(
@@ -695,10 +1054,10 @@ def run_hook(
 
 
 def run_checks(
-    root: Path, batch_id: str, config: dict[str, Any]
+    root: Path, batch_id: str, checks: list[Any]
 ) -> dict[str, dict[str, Any]]:
     results: dict[str, dict[str, Any]] = {}
-    for item in config.get("checks", []):
+    for item in checks:
         if not isinstance(item, dict):
             raise SystemExit("each check must be an object")
         name = str(item.get("name", "")).strip()
@@ -791,8 +1150,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
         if not source.is_file():
             print(f"card source not found: {source}", file=sys.stderr)
             return 2
+        config = load_config(root)
+        rule = commit_rule(root, config)
         try:
-            card, raw = read_planned_card(source)
+            card, raw = read_planned_card(
+                source, set(rule["types"]) if rule["types"] else None
+            )
         except ValueError as exc:
             print(f"invalid card: {exc}", file=sys.stderr)
             return 2
@@ -801,10 +1164,20 @@ def cmd_plan(args: argparse.Namespace) -> int:
             print(f"--id {args.id} does not match card id {batch_id}", file=sys.stderr)
             return 2
         target = batch_dir(root, batch_id)
-        if target.exists():
-            print(f"batch already exists: {batch_id}", file=sys.stderr)
-            return 1
-        config = load_config(root)
+        refresh = target.exists() and not archive_aborted(root, batch_id)
+        if refresh:
+            previous = load_json(target / "card.json")
+            if previous is not None and previous.get("legacy"):
+                print(f"batch already exists: {batch_id}", file=sys.stderr)
+                return 1
+            state = load_json(target / "state.json")
+            if state is not None and state.get("status") not in {"planned", "approved"}:
+                print(
+                    f"batch already started: {batch_id} "
+                    f"({state.get('status')}); abort it or use a new id",
+                    file=sys.stderr,
+                )
+                return 1
         docs_root = configured_docs_root(root, config) or docs_root_from_card(source)
         if docs_root is None:
             print(
@@ -839,10 +1212,32 @@ def cmd_plan(args: argparse.Namespace) -> int:
                 return 1
         snapshot = dict(card)
         snapshot["source"] = source_relative(root, source)
-        snapshot["source_sha256"] = hashlib.sha256(raw).hexdigest()
+        snapshot["source_sha256"] = source_card_hash(source)
+        digest = card_hash(snapshot)
+        if refresh:
+            previous = load_json(target / "card.json") or {}
+            changed = [
+                key
+                for key in sorted(set(previous) | set(snapshot))
+                if key not in {"source", "source_sha256"}
+                and previous.get(key) != snapshot.get(key)
+            ]
+            if not changed and previous.get("source_sha256") == snapshot["source_sha256"]:
+                write_plan_marker(source, batch_id, digest, utc_now()[:10])
+                print(f"unchanged {batch_id}")
+                print(f"hash: {digest[:8]}")
+                return 0
+            write_json(target / "card.json", snapshot)
+            (target / "approval.json").unlink(missing_ok=True)
+            print(f"updated {batch_id}: {', '.join(changed) or 'card source only'}")
+            print("approval cleared; run: batch.py approve " + batch_id)
+            print(f"hash: {digest[:8]}")
+            write_plan_marker(source, batch_id, digest, utc_now()[:10])
+            return 0
         write_json(target / "card.json", snapshot)
+        write_plan_marker(source, batch_id, digest, utc_now()[:10])
         print(f"planned {batch_id} from {snapshot['source']}")
-        print(f"hash: {card_hash(snapshot)[:8]}")
+        print(f"hash: {digest[:8]}")
         return 0
 
     if not args.goal:
@@ -856,7 +1251,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         print("ad-hoc id must be YYYYMMDD-<6 hex>", file=sys.stderr)
         return 2
     target = batch_dir(root, batch_id)
-    if target.exists():
+    if target.exists() and not archive_aborted(root, batch_id):
         print(f"batch already exists: {batch_id}", file=sys.stderr)
         return 1
     config = load_config(root)
@@ -945,11 +1340,25 @@ def cmd_start(args: argparse.Namespace) -> int:
     if not base:
         print(f"base does not resolve to a commit: {base_ref}", file=sys.stderr)
         return 1
+    skill_errors, skill_found = check_skills(root, card)
+    if skill_errors:
+        for item in skill_errors:
+            print(item, file=sys.stderr)
+        return 1
     slug = branch_slug(str(card.get("goal", "")))
     default_branch = f"{config.get('branch_prefix', 'batch/')}{batch_id}"
     if slug:
         default_branch = f"{default_branch}-{slug}"
     branch = args.branch or default_branch
+    here = current_branch(root)
+    prefix = str(config.get("branch_prefix", "batch/"))
+    if not args.no_branch and here.startswith(prefix):
+        print(
+            f"you are on batch branch {here}; "
+            f"switch to {base_ref} before starting another batch",
+            file=sys.stderr,
+        )
+        return 1
     if not args.no_branch:
         code, _, err = run_git(root, ["switch", "-c", branch])
         if code != 0:
@@ -962,14 +1371,25 @@ def cmd_start(args: argparse.Namespace) -> int:
         "base": base,
         "base_ref": base_ref,
         "branch": branch,
+        "branch_created": not args.no_branch,
         "card_hash": card_hash(card),
         "source_sha256": card.get("source_sha256"),
         "started_at": utc_now(),
+        "skills": skill_found,
         "checks": {},
     }
     write_json(batch_dir(root, batch_id) / "state.json", state)
     set_active(root, batch_id)
     print(f"started {batch_id} on {branch} (base {base})")
+    if skill_found:
+        print("skills to load before editing:")
+        for item in card.get("skills", []):
+            skill_id = str(item.get("id", ""))
+            plan = "required" if item.get("required") else "optional"
+            print(f"  - {skill_id} ({plan})  {skill_found.get(skill_id, '')}")
+        print(
+            f"record each skill in .batch/{batch_id}/evidence/skills/<skill-id>.md"
+        )
     return 0
 
 
@@ -979,6 +1399,10 @@ def cmd_check(args: argparse.Namespace) -> int:
     batch_id = resolve_id(root, args.id)
     card = read_card(root, batch_id)
     state = read_state(root, batch_id)
+    mismatch = batch_branch_mismatch(root, state, batch_id)
+    if mismatch:
+        print(mismatch, file=sys.stderr)
+        return 1
     if card.get("legacy"):
         print("legacy cards are read-only and cannot be checked", file=sys.stderr)
         return 1
@@ -995,7 +1419,20 @@ def cmd_check(args: argparse.Namespace) -> int:
         append_evidence(root, batch_id, f"source: FAIL ({message})")
         print(message, file=sys.stderr)
         return 1
+    source_path = card_source_path(root, card)
+    if source_path is not None and source_path.is_file():
+        marker = plan_marker_hash(source_path, batch_id)
+        if marker and not card_hash(card).startswith(marker):
+            print(
+                f"[warn] card marker {marker} does not match the planned hash "
+                f"{card_hash(card)[:8]}; re-plan",
+                file=sys.stderr,
+            )
     config = load_config(root)
+    release = bool(card.get("release")) or bool(getattr(args, "release", False))
+    checks = list(config.get("checks", []))
+    if release:
+        checks += list(config.get("release_checks", []))
     conflict = duplicate_id_error(root, card, config, batch_id)
     if conflict:
         state["status"] = "check_failed"
@@ -1017,11 +1454,34 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 1
     state["base"] = base
     state["base_ref"] = state.get("base_ref") or base_ref
-    changed, violations = check_scope(root, card, base, config)
-    added, deleted, binary, budget_error = check_budget(root, card, base, changed)
+    anchor = budget_anchor(root, base, state["base_ref"])
+    state["scope_base"] = anchor
+    changed, violations = check_scope(root, card, anchor, config)
+    added, deleted, binary, budget_error = check_budget(root, card, anchor, changed)
+    override_reason = str(getattr(args, "allow_over_budget", "") or "").strip()
+    budget_override: dict[str, Any] | None = None
+    if budget_error and override_reason:
+        budget_override = {
+            "budget": int(card.get("size_budget", 0)),
+            "lines": added + deleted,
+            "reason": override_reason,
+        }
+        budget_error = None
+    elif budget_error:
+        budget_error += '; rerun with --allow-over-budget "<why>" to record it'
     changelog_errors, changelog_warnings = check_changelog(root, card, changed)
     skill_errors, skill_found = check_skills(root, card)
-    gate_errors = [*violations, *changelog_errors, *skill_errors]
+    evidence_errors, evidence_warnings, skill_records = check_skill_evidence(
+        root, batch_id, card
+    )
+    commit_errors = check_commit_titles(root, anchor, config)
+    gate_errors = [
+        *violations,
+        *changelog_errors,
+        *skill_errors,
+        *evidence_errors,
+        *commit_errors,
+    ]
     if budget_error:
         gate_errors.append(budget_error)
 
@@ -1040,80 +1500,162 @@ def cmd_check(args: argparse.Namespace) -> int:
         append_evidence(root, batch_id, f"warn: {warning}")
     for violation in skill_errors:
         append_evidence(root, batch_id, violation)
+    for violation in evidence_errors:
+        append_evidence(root, batch_id, violation)
+    for violation in commit_errors:
+        append_evidence(root, batch_id, f"commit: {violation}")
+    append_evidence(
+        root,
+        batch_id,
+        "commit titles: "
+        + ("PASS" if not commit_errors else f"FAIL ({len(commit_errors)})"),
+    )
+    append_evidence(
+        root,
+        batch_id,
+        f"release: {'yes' if release else 'no'} ({len(checks)} checks)",
+    )
+    for warning in evidence_warnings:
+        append_evidence(root, batch_id, f"warn: {warning}")
     if budget_error:
         append_evidence(root, batch_id, budget_error)
+    if budget_override:
+        append_evidence(
+            root,
+            batch_id,
+            f"budget override: {budget_override['lines']} lines over "
+            f"{budget_override['budget']} ({budget_override['reason']})",
+        )
     for violation in gate_errors:
         print(f"[fail] {violation}", file=sys.stderr)
-    for warning in changelog_warnings:
+    for warning in [*changelog_warnings, *evidence_warnings]:
         print(f"[warn] {warning}", file=sys.stderr)
 
-    results = run_checks(root, batch_id, config) if not gate_errors else {}
+    results = run_checks(root, batch_id, checks) if not gate_errors else {}
     passed = not gate_errors and all(
         item.get("status") == "pass" for item in results.values()
     )
     state["status"] = "checked" if passed else "check_failed"
     state["checks"] = results
+    state["release"] = release
     state["scope"] = {
         "budget": int(card.get("size_budget", 0)),
         "changed": len(changed),
         "added": added,
         "deleted": deleted,
         "binary": binary,
+        "measured_from": anchor,
         "result": "pass" if not budget_error and not violations else "fail",
+        "violations": violations,
+        "override": bool(budget_override),
     }
+    state["budget_override"] = budget_override
     state["changelog"] = {
         "declared": [str(item) for item in card.get("changelog", [])],
         "warnings": changelog_warnings,
     }
     state["skills"] = skill_found
+    state["skill_evidence"] = skill_records
     state["checked_at"] = utc_now()
     write_json(batch_dir(root, batch_id) / "state.json", state)
     print(f"scope: {'PASS' if not violations else 'FAIL'} ({len(changed)} paths)")
     print(
         f"budget: {'SKIP' if not card.get('size_budget') else ('FAIL' if budget_error else 'PASS')}"
-        f" ({added + deleted} lines)"
+        f" ({added + deleted} lines from {anchor[:12]})"
+        + (", override recorded" if budget_override else "")
     )
     print(f"changelog: {'FAIL' if changelog_errors else 'PASS'}")
-    print(f"skills: {'FAIL' if skill_errors else 'PASS'}")
+    print(f"release: {'yes' if release else 'no'} ({len(checks)} checks)")
+    print(
+        f"skills: {'FAIL' if skill_errors or evidence_errors else 'PASS'}"
+        + (
+            " ("
+            + ", ".join(
+                f"{skill_id} {record['status']}"
+                for skill_id, record in skill_records.items()
+            )
+            + ")"
+            if skill_records
+            else ""
+        )
+    )
     print(f"result: {'PASS' if passed else 'FAIL'}")
     return 0 if passed else 1
 
 
-PR_BODY_SOURCE = "pr-body.source.md"
-PR_BODY_SECTIONS = (
-    "## Summary",
-    "## Impact",
-    "## Verification",
-    "## Risks",
-    "## Self-check",
-)
-
-
-def pr_body(root: Path, batch_id: str) -> str | None:
-    """Return the hand-written body, or ``None`` when the writer skipped it.
-
-    A generated body is not a substitute: the pull request template asks five
-    questions a generator cannot answer, so a missing source file is an error.
-    """
-    written = batch_dir(root, batch_id) / PR_BODY_SOURCE
-    if not written.is_file():
-        return None
-    text = written.read_text(encoding="utf-8").strip()
-    return text or None
-
-
-def missing_sections(body: str) -> list[str]:
-    """Name the sections of the template a body is missing, in template order."""
-    positions = []
-    for name in PR_BODY_SECTIONS:
-        if name not in body:
-            positions.append(name)
-    return positions
-
-
-def sections_out_of_order(body: str) -> bool:
-    seen = [body.index(name) for name in PR_BODY_SECTIONS if name in body]
-    return seen != sorted(seen)
+def pr_body(root: Path, batch_id: str) -> str:
+    """Render the prepared PR body in the shape of the repository PR template."""
+    card = read_card(root, batch_id)
+    state = read_state(root, batch_id)
+    anchor = str(state.get("scope_base") or state.get("base", "main"))
+    changed = changed_paths(root, anchor, load_config(root))
+    scope = state.get("scope") or {}
+    checks = state.get("checks") or {}
+    base = state.get("base_ref") or state.get("base", "")
+    lines = [
+        "## Summary",
+        "",
+        f"Batch `{batch_id}`: {card.get('goal', '')}",
+        "",
+        f"- Branch: `{state.get('branch', '')}`",
+        f"- Base: `{base}`",
+        "",
+        "## Impact",
+        "",
+        "Allowed:",
+        *[f"- `{item}`" for item in card.get("allowed", [])],
+        "",
+        f"Changed files: {len(changed)}",
+        *[f"- `{item}`" for item in changed],
+        "",
+        "## Verification",
+        "",
+    ]
+    if checks:
+        lines.extend(
+            f"- `{name}`: {item.get('status', 'unknown')}"
+            for name, item in checks.items()
+        )
+    else:
+        lines.append("- checks: none configured")
+    budget = int(scope.get("budget") or 0)
+    added = int(scope.get("added") or 0)
+    deleted = int(scope.get("deleted") or 0)
+    lines.append(
+        f"- scope: {str(scope.get('result', 'unknown')).upper()} "
+        f"({scope.get('changed', len(changed))} files, {added + deleted} lines, "
+        f"budget {budget or 'none'})"
+    )
+    lines.append(f"- evidence: `.batch/{batch_id}/evidence.log`")
+    lines.extend(["", "## Risks", ""])
+    risks = [str(item) for item in scope.get("violations", [])]
+    override = state.get("budget_override") or None
+    if budget and added + deleted > budget:
+        if override:
+            risks.append(
+                f"budget: {added + deleted} changed lines exceeds {budget} — "
+                f"override: {override.get('reason', '')}"
+            )
+        else:
+            risks.append(f"budget: {added + deleted} changed lines exceeds {budget}")
+    if int(scope.get("binary") or 0):
+        risks.append(f"binary files: {scope.get('binary')} (diff is not reviewable)")
+    for key, label in (("id_error", "id"), ("source_error", "source")):
+        if state.get(key):
+            risks.append(f"{label}: {state[key]}")
+    warnings = (state.get("changelog") or {}).get("warnings") or []
+    risks.extend(str(item) for item in warnings)
+    if risks:
+        lines.extend(f"- {item}" for item in risks)
+    else:
+        lines.append("None recorded by the gate.")
+    lines.extend(["", "## Self-check", ""])
+    criteria = card.get("acceptance", card.get("exit_criteria", []))
+    if criteria:
+        lines.extend(f"- {item}" for item in criteria)
+    else:
+        lines.append("- none recorded")
+    return "\n".join(lines)
 
 
 def scaffold_language(root: Path) -> dict[str, Any]:
@@ -1167,29 +1709,23 @@ def pr_translations(
     digest: str,
     config: dict[str, Any],
     state: dict[str, Any],
-) -> tuple[list[str], list[str]]:
-    """Write PR body translations through ``config.translate``.
-
-    Returns the locales written and the problems found. A missing hook, a hook
-    that exits non-zero and a hook that writes nothing are all problems: the
-    English body is authoritative, but a reader who cannot get the other
-    language is a failure of the hand-over, not a warning.
-    """
+) -> list[str]:
+    """Write PR body translations through ``config.translate``; best effort."""
     language = scaffold_language(root)
     source_locale = language["external"]
     targets = [item for item in language["supported"] if item != source_locale]
     if not targets:
-        return [], []
+        return []
     command = config.get("translate")
     if not command:
-        return [], [
-            "config.translate is empty; the PR body has no translation "
-            "(set LETHEBAR_TRANSLATION_FILE for the offline hook)"
-        ]
+        print(
+            "config.translate is empty; skipped PR body translations",
+            file=sys.stderr,
+        )
+        return []
     card = read_card(root, batch_id)
     directory = batch_dir(root, batch_id)
     translations: list[dict[str, Any]] = []
-    problems: list[str] = []
     for locale in targets:
         out = directory / f"pr-body.{locale}.md"
         out.unlink(missing_ok=True)
@@ -1209,11 +1745,12 @@ def pr_translations(
         if out_text:
             print(out_text)
         if code != 0:
-            detail = err_text.strip() or "no message"
-            problems.append(f"translation {locale} failed (exit {code}): {detail}")
+            print(f"translation {locale} failed (exit {code})", file=sys.stderr)
+            if err_text:
+                print(err_text, file=sys.stderr)
             continue
         if not out.exists() or not out.read_text(encoding="utf-8").strip():
-            problems.append(f"translation {locale}: the hook produced no output")
+            print(f"translation {locale}: hook produced no output", file=sys.stderr)
             continue
         translations.append(
             {
@@ -1224,11 +1761,11 @@ def pr_translations(
             }
         )
     if not translations:
-        return [], problems or ["no translation was written"]
+        return []
     write_json(
         directory / "pr-body.manifest.json",
         {
-            "source": body_path.relative_to(root).as_posix(),
+            "source": source_relative(root, body_path),
             "source_sha256": digest,
             "source_locale": source_locale,
             "generated_at": utc_now(),
@@ -1237,41 +1774,41 @@ def pr_translations(
         },
     )
     print(f"translations: {', '.join(item['locale'] for item in translations)}")
-    return [item["locale"] for item in translations], problems
+    return [item["locale"] for item in translations]
 
 
-def redo_translations(root: Path, batch_id: str, state: dict[str, Any]) -> int:
-    """Regenerate the PR body translations from the body already on disk.
-
-    ``pr --prepare`` refuses to run once a batch is merged, but a translator
-    can be improved afterwards, and the translation is a file in the batch
-    directory, not a part of the pull request.
-    """
-    body_path = root / str(state.get("pr_body") or "")
-    if not state.get("pr_body") or not body_path.is_file():
-        print(
-            "no prepared PR body to translate; run 'pr --prepare' first",
-            file=sys.stderr,
-        )
-        return 1
-    digest = hashlib.sha256(body_path.read_bytes()).hexdigest()
-    config = load_config(root)
-    locales, problems = pr_translations(root, batch_id, body_path, digest, config, state)
-    state["pr_translations"] = locales
-    write_json(batch_dir(root, batch_id) / "state.json", state)
-    if problems:
-        for problem in problems:
-            print(problem, file=sys.stderr)
-        return 1
-    return 0
+def pr_skills(root: Path, batch_id: str) -> str:
+    """Render the skill usage report as a local review supplement."""
+    card = read_card(root, batch_id)
+    state = read_state(root, batch_id)
+    records = state.get("skill_evidence", {})
+    lines = [
+        "# Skills",
+        "",
+        "Local review supplement. Not part of the PR body; never committed.",
+        "",
+        "| Skill | Plan | Actual | What changed | Proof |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for item in card.get("skills", []):
+        skill_id = str(item.get("id", ""))
+        record = records.get(skill_id, {})
+        plan = "required" if item.get("required") else "optional"
+        actual = str(record.get("status") or "missing")
+        changed = str(record.get("changed") or "-").replace("|", "\\|")
+        proof = str(record.get("proof") or "-").replace("|", "\\|")
+        lines.append(f"| `{skill_id}` | {plan} | {actual} | {changed} | {proof} |")
+    return "\n".join(lines) + "\n"
 
 
 def cmd_pr(args: argparse.Namespace) -> int:
     root = args.root.resolve()
     batch_id = resolve_id(root, args.id)
     state = read_state(root, batch_id)
-    if args.translations_only:
-        return redo_translations(root, batch_id, state)
+    mismatch = batch_branch_mismatch(root, state, batch_id)
+    if mismatch:
+        print(mismatch, file=sys.stderr)
+        return 1
     if state.get("status") not in {"checked", "pr_ready"}:
         print("run 'check' successfully before preparing a PR", file=sys.stderr)
         return 1
@@ -1279,6 +1816,38 @@ def cmd_pr(args: argparse.Namespace) -> int:
     if card.get("legacy"):
         print("legacy cards have no PR flow", file=sys.stderr)
         return 1
+    config = load_config(root)
+    rule = commit_rule(root, config)
+    subject = str(card.get("pr_title") or card.get("goal", batch_id)).strip()
+    title = subject
+    if rule["enabled"]:
+        kind = str(card.get("type", ""))
+        if rule["types"] and kind not in rule["types"]:
+            print(
+                f"card type '{kind}' is not a commit type; use one of: "
+                f"{', '.join(rule['types'])}",
+                file=sys.stderr,
+            )
+            return 1
+        scope = str(card.get("git_scope") or "").strip()
+        if rule["scopes"] and not scope:
+            print(
+                "card.git_scope is required when git scopes are configured; "
+                f"choose one of: {', '.join(rule['scopes'])}",
+                file=sys.stderr,
+            )
+            return 1
+        if scope and rule["scopes"] and scope not in rule["scopes"]:
+            print(
+                f"card.git_scope '{scope}' is not one of: "
+                f"{', '.join(rule['scopes'])}",
+                file=sys.stderr,
+            )
+            return 1
+        if scope:
+            title = f"{kind}({scope}): {subject}"
+        else:
+            title = f"{kind}: {subject}"
     approval = load_json(batch_dir(root, batch_id) / "approval.json")
     if approval is None or approval.get("card_hash") != card_hash(card):
         print("card is not approved (or approval is stale)", file=sys.stderr)
@@ -1287,54 +1856,42 @@ def cmd_pr(args: argparse.Namespace) -> int:
     if not current:
         print(message, file=sys.stderr)
         return 1
-    body = pr_body(root, batch_id)
-    if body is None:
-        print(
-            f"missing .batch/{batch_id}/{PR_BODY_SOURCE}; write the body first. "
-            "The template asks five questions:",
-            file=sys.stderr,
-        )
-        for name in PR_BODY_SECTIONS:
-            print(f"  {name}", file=sys.stderr)
-        return 1
-    missing = missing_sections(body)
-    if missing:
-        print(
-            "the body is missing template sections: " + ", ".join(missing),
-            file=sys.stderr,
-        )
-        return 1
-    if sections_out_of_order(body):
-        print(
-            "the body has the template sections out of order: "
-            + " -> ".join(PR_BODY_SECTIONS),
-            file=sys.stderr,
-        )
-        return 1
-    body_path = args.body_file or (batch_dir(root, batch_id) / "pr-body.md")
+    source: Path | None = None
+    if args.body_from:
+        source = Path(args.body_from)
+        source = source if source.is_absolute() else root / source
+        if not source.is_file():
+            print(f"body source not found: {source}", file=sys.stderr)
+            return 2
+        payload = source.read_text(encoding="utf-8")
+    else:
+        payload = pr_body(root, batch_id) + "\n"
+    body_path = Path(args.body_file) if args.body_file else (batch_dir(root, batch_id) / "pr-body.md")
     body_path = body_path if body_path.is_absolute() else root / body_path
-    write_text(body_path, body + "\n")
-    digest = hashlib.sha256(body_path.read_bytes()).hexdigest()
-    print(f"prepared {body_path.relative_to(root)}")
+    if not inside_project(root, body_path):
+        print(f"body output must stay inside the project: {body_path}", file=sys.stderr)
+        return 2
+    if source is not None and body_path.resolve() == source.resolve():
+        print("--body-from and --body-out point at the same file", file=sys.stderr)
+        return 2
+    write_text(body_path, payload)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    shown = source_relative(root, body_path)
+    print(f"prepared {shown}")
     print(f"body hash: {digest[:8]}")
     state["status"] = "pr_ready"
-    state["pr_body"] = str(body_path.relative_to(root))
+    state["pr_body"] = shown
     state["pr_body_sha256"] = digest
-    config = load_config(root)
-    locales, problems = pr_translations(
+    state["pr_title"] = title
+    state["pr_translations"] = pr_translations(
         root, batch_id, body_path, digest, config, state
     )
-    state["pr_translations"] = locales
+    if card.get("skills"):
+        skills_path = batch_dir(root, batch_id) / "pr-skills.md"
+        write_text(skills_path, pr_skills(root, batch_id))
+        state["pr_skills"] = skills_path.relative_to(root).as_posix()
+        print(f"skills report: {state['pr_skills']}")
     write_json(batch_dir(root, batch_id) / "state.json", state)
-    if problems:
-        for problem in problems:
-            print(problem, file=sys.stderr)
-        print(
-            "the pull request body has no translation; fix the hook or set "
-            "LETHEBAR_TRANSLATION_FILE",
-            file=sys.stderr,
-        )
-        return 1
 
     if not args.create:
         return 0
@@ -1350,7 +1907,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
         command,
         {
             "id": batch_id,
-            "title": str(card.get("goal", batch_id)),
+            "title": title,
             "body": str(body_path),
             "branch": str(state.get("branch", "")),
             "root": str(root),
@@ -1366,6 +1923,119 @@ def cmd_pr(args: argparse.Namespace) -> int:
     state["pr_output"] = out
     write_json(batch_dir(root, batch_id) / "state.json", state)
     print(f"created PR for {batch_id}")
+    return 0
+
+
+def exit_record_draft(
+    card: dict[str, Any], state: dict[str, Any], batch_id: str
+) -> str:
+    """Build an exit record skeleton from the card and the batch state."""
+    scope = state.get("scope") or {}
+    budget = int(scope.get("budget") or card.get("size_budget") or 0)
+    changed = int(scope.get("changed") or 0)
+    lines_changed = int(scope.get("added") or 0) + int(scope.get("deleted") or 0)
+    forced = "yes" if state.get("check_override") else "no"
+    today = str(state.get("merged_at") or utc_now())[:10]
+    rows = [
+        f"# {batch_id} — Exit record",
+        "",
+        "## Result",
+        "",
+        "pass" if state.get("status") == "merged" else "fail",
+        "",
+        "## Delivery",
+        "",
+        "| Field | Value |",
+        "|---|---|",
+        f"| PR | {state.get('pr') or '#fill'} |",
+        "| Commit | `fill` |",
+        f"| Merged at | {today} |",
+        "| By | @fill |",
+        f"| Merge | {state.get('merge_mode') or 'squash'} |",
+        f"| Forced | {forced} |",
+    ]
+    if forced == "yes":
+        reason = str((state.get("check_override") or {}).get("reason", ""))
+        rows.append(f"| Force reason | {reason or 'fill'} |")
+    rows += [
+        "",
+        "## Traceability",
+        "",
+        "- `REQ-fill`",
+        "- `TC-fill`",
+        "",
+        "## Acceptance",
+        "",
+        "| # | Criterion | Evidence | Result |",
+        "|---|---|---|---|",
+    ]
+    criteria = card.get("acceptance") or []
+    for index, item in enumerate(criteria, 1):
+        rows.append(f"| {index} | {item} | fill | fill |")
+    if not criteria:
+        rows.append("| 1 | fill | fill | fill |")
+    rows += ["", "## Skills", "", "| Skill | Plan | Actual | Evidence |", "|---|---|---|---|"]
+    records = state.get("skill_evidence") or {}
+    for item in card.get("skills") or []:
+        skill_id = str(item.get("id", ""))
+        record = records.get(skill_id) or {}
+        plan = "required" if item.get("required") else "optional"
+        actual = record.get("status") or "fill"
+        proof = record.get("proof") or "fill"
+        rows.append(f"| {skill_id} | {plan} | {actual} | {proof} |")
+    if not card.get("skills"):
+        rows.append("| fill | fill | fill | fill |")
+    rows += ["", "## Changelog", ""]
+    fragments = card.get("changelog") or []
+    rows += [f"- `{item}` — fill" for item in fragments] or ["- fill"]
+    rows += [
+        "",
+        "## Scope",
+        "",
+        "| Field | Value |",
+        "|---|---|",
+        f"| Budget | {budget} |",
+        f"| Changed | {lines_changed} |",
+        f"| Result | {'pass' if scope.get('result') == 'pass' else 'fail'} |",
+        "",
+        "## Deviations",
+        "",
+    ]
+    override = state.get("budget_override") or None
+    if override:
+        rows.append(
+            f"- budget override: {override.get('lines')} lines over "
+            f"{override.get('budget')} — {override.get('reason')}"
+        )
+    else:
+        rows.append("- none")
+    rows += ["", "## Follow-ups", "", "- none", ""]
+    return "\n".join(rows)
+
+
+def cmd_exit(args: argparse.Namespace) -> int:
+    root = args.root.resolve()
+    batch_id = resolve_id(root, args.id)
+    card = read_card(root, batch_id)
+    state = read_state(root, batch_id)
+    target = Path(args.out) if args.out else None
+    if target is None:
+        config = load_config(root)
+        docs_root = configured_docs_root(root, config)
+        if docs_root is None:
+            source = card_source_path(root, card)
+            docs_root = docs_root_from_card(source) if source else None
+        if docs_root is None:
+            print("docs repo not found; pass --out <path>", file=sys.stderr)
+            return 2
+        target = docs_root / DOCS_RECORDS / "live" / f"{batch_id}-exit.md"
+    if target.exists() and not args.force:
+        print(f"{target} exists; pass --force to overwrite", file=sys.stderr)
+        return 1
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(exit_record_draft(card, state, batch_id) + "\n", encoding="utf-8")
+    print(f"drafted {target}")
+    print("fill the remaining fields, then run check_records.py")
     return 0
 
 
@@ -1449,6 +2119,9 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(err, file=sys.stderr)
     if code != 0:
         return 1
+    merged_problems = check_merged_commit(root, config)
+    for item in merged_problems:
+        print(f"warning: merged commit: {item}", file=sys.stderr)
     state["status"] = "merged"
     state["merged_at"] = utc_now()
     write_json(batch_dir(root, batch_id) / "state.json", state)
@@ -1464,12 +2137,111 @@ def cmd_abort(args: argparse.Namespace) -> int:
     if state.get("status") == "merged":
         print("cannot abort a merged batch", file=sys.stderr)
         return 1
+    branch = str(state.get("branch") or "")
+    base_ref = str(state.get("base_ref") or "")
+    switched_to = ""
+    if branch and state.get("branch_created") is True and current_branch(root) == branch:
+        code, status_out, _ = run_git(
+            root, ["status", "--porcelain", "--", ".", f":(exclude){STATE_DIR}"]
+        )
+        if code == 0 and not status_out:
+            target = base_ref or str(state.get("base") or "")
+            if target:
+                switch_code, _, switch_err = run_git(root, ["switch", target])
+                if switch_code == 0:
+                    switched_to = target
+                else:
+                    print(
+                        f"could not switch back to {target}: {switch_err} "
+                        f"(the branch {branch} is kept)",
+                        file=sys.stderr,
+                    )
+        else:
+            print(
+                f"working tree has changes; still on {branch}. "
+                "Commit or stash them, then run: git switch "
+                f"{base_ref or '<base>'}",
+                file=sys.stderr,
+            )
     state["status"] = "aborted"
     state["aborted_at"] = utc_now()
     write_json(batch_dir(root, batch_id) / "state.json", state)
     if active_id(root) == batch_id:
         clear_active(root)
     print(f"aborted {batch_id}")
+    if switched_to:
+        print(f"switched back to {switched_to}")
+    if branch:
+        print(f"branch kept: {branch}")
+    return 0
+
+
+def cmd_pause(args: argparse.Namespace) -> int:
+    root = args.root.resolve()
+    batch_id = resolve_id(root, args.id)
+    state = read_state(root, batch_id)
+    status = str(state.get("status") or "")
+    if status == "paused":
+        print(f"{batch_id} is already paused")
+        return 0
+    if status not in PAUSABLE_STATUSES:
+        print(f"cannot pause a {status} batch", file=sys.stderr)
+        return 1
+    state["paused_from"] = status
+    state["status"] = "paused"
+    state["paused_at"] = utc_now()
+    write_json(batch_dir(root, batch_id) / "state.json", state)
+    if active_id(root) == batch_id:
+        clear_active(root)
+    branch = str(state.get("branch") or "")
+    print(f"paused {batch_id} ({status})")
+    if branch:
+        print(f"branch: {branch}")
+    print("work stays where it is; park it with 'git commit' or 'git stash'")
+    print(f"resume with: batch.py resume {batch_id}")
+    return 0
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    root = args.root.resolve()
+    git_required(root)
+    batch_id = resolve_id(root, args.id)
+    state = read_state(root, batch_id)
+    status = str(state.get("status") or "")
+    if status != "paused":
+        print(f"batch is not paused: {status}", file=sys.stderr)
+        return 1
+    branch = str(state.get("branch") or "")
+    if not branch:
+        print("state has no branch; cannot resume", file=sys.stderr)
+        return 1
+    if not branch_exists(root, branch):
+        print(
+            f"branch is gone: {branch}; abort the batch and plan it again",
+            file=sys.stderr,
+        )
+        return 1
+    other = active_id(root)
+    if other and other != batch_id:
+        print(f"another batch is active: {other}", file=sys.stderr)
+        return 1
+    card = read_card(root, batch_id)
+    if card_hash(card) != state.get("card_hash"):
+        print("card changed since start; re-approve it before resuming", file=sys.stderr)
+        return 1
+    current, message = source_is_current(root, card)
+    if not current:
+        print(message, file=sys.stderr)
+        return 1
+    code, _, err = run_git(root, ["switch", branch])
+    if code != 0:
+        print(f"could not switch to {branch}: {err}", file=sys.stderr)
+        return 1
+    state["status"] = str(state.get("paused_from") or "started")
+    state["resumed_at"] = utc_now()
+    write_json(batch_dir(root, batch_id) / "state.json", state)
+    set_active(root, batch_id)
+    print(f"resumed {batch_id} on {branch} ({state['status']})")
     return 0
 
 
@@ -1486,7 +2258,7 @@ def cmd_adopt(args: argparse.Namespace) -> int:
         print("legacy id must be B followed by digits", file=sys.stderr)
         return 2
     target = batch_dir(root, batch_id)
-    if target.exists():
+    if target.exists() and not archive_aborted(root, batch_id):
         print(f"batch already exists: {batch_id}", file=sys.stderr)
         return 1
     snapshot = {
@@ -1508,7 +2280,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         print("no batches")
         return 0
     for path in sorted(root_dir.iterdir(), key=lambda item: batch_sort_key(item.name)):
-        if not path.is_dir():
+        if not path.is_dir() or not ID_RE.fullmatch(path.name):
             continue
         state = load_json(path / "state.json") or {}
         card = load_json(path / "card.json") or {}
@@ -1562,6 +2334,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     check = sub.add_parser("check", help="check scope and configured commands")
     check.add_argument("id", nargs="?")
+    check.add_argument(
+        "--release",
+        action="store_true",
+        help="also run config.release_checks",
+    )
+    check.add_argument(
+        "--allow-over-budget",
+        metavar="REASON",
+        help="record why this batch exceeds its size budget",
+    )
     check.set_defaults(func=cmd_check)
 
     pr = sub.add_parser("pr", help="prepare or create a PR body")
@@ -1569,11 +2351,15 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--prepare", action="store_true")
     pr.add_argument("--create", action="store_true")
     pr.add_argument(
-        "--translations-only",
-        action="store_true",
-        help="redo the PR body translations from the body already on disk",
+        "--body-out",
+        "--body-file",
+        dest="body_file",
+        help="where to write the body (default .batch/<id>/pr-body.md)",
     )
-    pr.add_argument("--body-file", type=Path)
+    pr.add_argument(
+        "--body-from",
+        help="read the body from this file instead of generating it",
+    )
     pr.add_argument("--confirm")
     pr.set_defaults(func=cmd_pr)
 
@@ -1598,9 +2384,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     merge.set_defaults(func=cmd_merge)
 
+    exit_parser = sub.add_parser(
+        "exit", help="draft the exit record from the card and state"
+    )
+    exit_parser.add_argument("id", nargs="?")
+    exit_parser.add_argument(
+        "--out",
+        help="write here instead of <docs>/records/live/<id>-exit.md",
+    )
+    exit_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite an existing exit record",
+    )
+    exit_parser.set_defaults(func=cmd_exit)
+
     abort = sub.add_parser("abort", help="abort an unmerged batch")
     abort.add_argument("id", nargs="?")
     abort.set_defaults(func=cmd_abort)
+
+    pause = sub.add_parser("pause", help="park a batch and keep its branch")
+    pause.add_argument("id", nargs="?")
+    pause.set_defaults(func=cmd_pause)
+
+    resume = sub.add_parser("resume", help="return to a paused batch")
+    resume.add_argument("id", nargs="?")
+    resume.set_defaults(func=cmd_resume)
 
     listing = sub.add_parser("list", help="list batches")
     listing.set_defaults(func=cmd_list)
