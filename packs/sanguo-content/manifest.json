@@ -1,0 +1,75 @@
+{
+  "id": "sanguo-content",
+  "version": "1.0.0",
+  "specVersion": "2.0.0",
+  "kind": "layer",
+  "layer": "content",
+  "target": "sanguo",
+  "requires": [
+    {
+      "id": "sanguo",
+      "version": ">=1.0.0 <2.0.0"
+    }
+  ],
+  "engine": ">=4.7.0 <5.0.0",
+  "name": "三国·朝堂",
+  "defaultLocale": "zh-CN",
+  "locales": [
+    "en"
+  ],
+  "names": {
+    "zh-CN": "三国·朝堂",
+    "en": "Three Kingdoms: the court"
+  },
+  "protocol": "turn_based@1",
+  "capabilities": [
+    "text@1"
+  ],
+  "mechanics": [],
+  "entry": "court",
+  "saveSchema": 1,
+  "assets": [],
+  "content": {
+    "view": "first",
+    "density": "sparse",
+    "cast": [
+      {
+        "id": "xian",
+        "name": "汉献帝",
+        "role": "天子"
+      },
+      {
+        "id": "dong",
+        "name": "董卓",
+        "role": "相国"
+      },
+      {
+        "id": "wang",
+        "name": "王允",
+        "role": "司徒"
+      }
+    ],
+    "arc": [
+      {
+        "turn": 1,
+        "label": "初平元年 · 朝议"
+      },
+      {
+        "turn": 9,
+        "label": "关东兵起"
+      },
+      {
+        "turn": 17,
+        "label": "迁都长安"
+      }
+    ]
+  },
+  "meta": {
+    "pitch": {
+      "en": "The same war seen from the throne room.",
+      "zh-CN": "同一场乱世，从朝堂这一侧看。"
+    },
+    "audience": "adults",
+    "minutes": 20
+  }
+}
