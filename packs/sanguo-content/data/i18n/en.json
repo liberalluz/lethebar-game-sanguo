@@ -1,0 +1,11 @@
+{
+  "court": {
+    "text": "This package only changes the content layer; the story text comes from the base package.",
+    "choices": []
+  },
+  "strings": {
+    "cast.xian": "Emperor Xian",
+    "cast.dong": "Dong Zhuo",
+    "cast.wang": "Wang Yun"
+  }
+}
