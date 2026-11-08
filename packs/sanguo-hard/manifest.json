@@ -1,6 +1,6 @@
 {
   "id": "sanguo-hard",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "specVersion": "2.0.0",
   "kind": "layer",
   "layer": "mod",
@@ -14,9 +14,6 @@
   "engine": ">=4.7.0 <5.0.0",
   "name": "三国·苛政",
   "defaultLocale": "zh-CN",
-  "locales": [
-    "en"
-  ],
   "names": {
     "zh-CN": "三国·苛政",
     "en": "Three Kingdoms: hard rule"
