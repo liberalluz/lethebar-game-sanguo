@@ -1,0 +1,43 @@
+{
+  "id": "sanguo-hard",
+  "version": "1.0.0",
+  "specVersion": "2.0.0",
+  "kind": "layer",
+  "layer": "mod",
+  "target": "sanguo",
+  "requires": [
+    {
+      "id": "sanguo",
+      "version": ">=1.0.0 <2.0.0"
+    }
+  ],
+  "engine": ">=4.7.0 <5.0.0",
+  "name": "三国·苛政",
+  "defaultLocale": "zh-CN",
+  "locales": [
+    "en"
+  ],
+  "names": {
+    "zh-CN": "三国·苛政",
+    "en": "Three Kingdoms: hard rule"
+  },
+  "protocol": "turn_based@1",
+  "capabilities": [
+    "text@1",
+    "ledger@1"
+  ],
+  "mechanics": [
+    "ledger"
+  ],
+  "entry": "placeholder",
+  "saveSchema": 1,
+  "assets": [],
+  "meta": {
+    "pitch": {
+      "en": "The same war with an emptier granary and a levy that buys coin with standing.",
+      "zh-CN": "同一场乱世，粮仓更薄，摊派用声望换金帛。"
+    },
+    "audience": "adults",
+    "minutes": 25
+  }
+}
