@@ -71,6 +71,13 @@ Scopes: pick exactly one from the closed list below.
   a single commit and apply the same rules.
 - Detail like the above belongs in this file, not in `CONTRIBUTING.md`: that
   file is the door, and a rule copied into two places drifts in one of them.
+- A card names the requirements it closes, in its own prose: `Closes: REQ-007,
+  REQ-013`, or `Closes: none - <why>` when the batch changes no requirement. The
+  card is written before the work, so this is a promise; the exit record keeps
+  it by citing the same requirements as test cases, `TC-` ids from the STD, or
+  `none - <why>` when nothing was run. A batch that closes nothing and says so
+  is honest; a batch that closes something and stays silent breaks the chain
+  from `SRS.md` to the release notes.
 
 ## 3. Pull requests
 
