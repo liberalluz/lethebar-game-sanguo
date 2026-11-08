@@ -1,5 +1,29 @@
 # Changelog
 
+## sanguo-hard v1.0.1 - 2026-11-08
+
+### Added
+- `packs/sanguo-hard`, a mod layer over `sanguo`: grain is capped at 25, `levy` trades standing for coin, and `patrol` leaves the menu.
+
+### Fixed
+- `sanguo-hard` no longer declares the `en` locale. The engine refused the package before reading it: a declared locale must fill every node and every label, and the table carried one action string, so `V-22` stopped the install.
+- `sanguo-hard` is `1.0.1`; `1.0.0` never reached a player, only a draft release.
+
+## repo v0.2.0 - 2026-11-08
+
+### Added
+- `check --release` runs the release self-test, so an ordinary check stays fast and the tool that cuts a release is proved before a release.
+
+### Changed
+- The card game is recorded as a second bundle of this world: `ADR-0002` replaces `ADR-0001`, which `ADR-0014`'s rule against introducing a card refuses, and which `ADR-0013`'s append-only-to-declared-lists rule leaves with nothing to append to.
+- `ADR-0001` keeps its reasoning: its title now says it was superseded, so the next reader meets the wrong turn and the reason together.
+- The scope table now places the two things it could not place: `docs/baselines.md` and `docs/baselines/` are `repo` records, as the engine files them, and `docs/` no longer claims them.
+- A changelog fragment is stated to have no scope of its own: `changelog.d/` is a waiting room, and a fragment takes the scope of the commit that earns it.
+- The batch tool is the Nebula release's file: batches can pause, resume and abort without leaving a branch behind, and a commit title is checked against the rule the scaffold carries.
+
+### Fixed
+- The checks build their fixtures under `.test-tmp` instead of a sandbox directory that mode 0o700 makes undeletable.
+
 ## repo v0.1.0 - 2026-11-07
 
 ### Added
