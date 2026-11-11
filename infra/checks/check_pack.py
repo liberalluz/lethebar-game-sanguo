@@ -22,14 +22,18 @@ from fixtures import fixture_dir, leftovers
 
 ALLOWED_ROOTS = {"data", "assets", "i18n"}
 MANIFEST = "manifest.json"
-MAX_ENTRIES = 512
-MAX_FILE_BYTES = 8 * 1024 * 1024
+MAX_ENTRIES = 500
+MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_TOTAL_BYTES = 32 * 1024 * 1024
 EXECUTABLE_SUFFIXES = {
     ".gd", ".exe", ".sh", ".dll", ".bat", ".cmd", ".ps1", ".py", ".js",
     ".mjs", ".so", ".dylib", ".app", ".apk", ".jar", ".wasm",
 }
 REQUIRED_FIELDS = ("id", "version", "specVersion", "engine", "kind", "protocol")
+# The dimensions manifest_schema.gd applies today. This checker runs in an
+# author's repository, where app/ does not exist, so the list is a copy; the
+# guide and the pack page are the other two places that name it.
+APPLIED_LAYERS = ("content", "mod", "assets")
 ID_PATTERN = re.compile(r"^[a-z0-9-]+$")
 SEMVER_PATTERN = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 ENGINE_PATTERN = re.compile(r"^>=(\d+\.\d+\.\d+) <(\d+\.\d+\.\d+)$")
@@ -115,7 +119,24 @@ def check_manifest(payload: bytes) -> list[str]:
     return problems
 
 
-def check_archive(path: Path) -> list[str]:
+def manifest_warnings(payload: bytes) -> list[str]:
+    """Things that do not refuse the archive but change what it does."""
+    try:
+        manifest = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    if not isinstance(manifest, dict):
+        return []
+    layer = manifest.get("layer")
+    if manifest.get("kind") == "layer" and layer not in APPLIED_LAYERS:
+        return [
+            f"{MANIFEST}: layer {layer!r} is not one this engine build applies; "
+            "it installs and changes nothing"
+        ]
+    return []
+
+
+def check_archive(path: Path, warnings: list[str] | None = None) -> list[str]:
     if not path.is_file():
         return [f"{path}: does not exist"]
     try:
@@ -143,6 +164,8 @@ def check_archive(path: Path) -> list[str]:
             problems.append(f"{MANIFEST}: is not at the root")
             return problems
         problems.extend(check_manifest(archive.read(MANIFEST)))
+        if warnings is not None:
+            warnings.extend(manifest_warnings(archive.read(MANIFEST)))
     return problems
 
 
@@ -259,6 +282,24 @@ def self_test() -> int:
                 "is not '>=x.y.z <x.y.z'",
                 False,
             ),
+            (
+                "an archive over the entry cap",
+                fixture(directory, "too-many", {
+                    **good,
+                    **{f"data/n{i:03d}.json": b"{}" for i in range(497)},
+                }),
+                "entry cap",
+                False,
+            ),
+            (
+                "a file over the file cap",
+                fixture(directory, "too-big", {
+                    **good,
+                    "data/big.json": b"\0" * (4 * 1024 * 1024 + 1),
+                }),
+                "file cap",
+                False,
+            ),
         ]
 
         failures = 0
@@ -273,7 +314,38 @@ def self_test() -> int:
             print(f"[{'ok' if ok else 'fail'}] {title}: {detail}")
             failures += 0 if ok else 1
 
-    print(f"self-test: {len(cases)} cases, {failures} failure(s)")
+        if MAX_ENTRIES != 500 or MAX_FILE_BYTES != 4 * 1024 * 1024:
+            print(
+                "[fail] the caps do not match app/core/package_limits.gd: "
+                f"{MAX_ENTRIES} entries and {MAX_FILE_BYTES} bytes per file"
+            )
+            failures += 1
+
+        layer_cases = 0
+        for title, name, layer, expects_warning in (
+            ("a layer dimension this build ignores warns", "layer-genre", "genre", True),
+            ("a layer dimension this build applies is quiet", "layer-content", "content", False),
+        ):
+            layer_manifest = json.dumps({
+                "id": name,
+                "version": "1.0.0",
+                "specVersion": "2.0.0",
+                "engine": ">=4.7.0 <5.0.0",
+                "kind": "layer",
+                "layer": layer,
+                "target": "demo-pack",
+                "protocol": "linear@1",
+            }).encode("utf-8")
+            archive = fixture(directory, name, {MANIFEST: layer_manifest})
+            found: list[str] = []
+            problems = check_archive(archive, found)
+            ok = not problems and bool(found) == expects_warning
+            detail = "; ".join(found) if found else "no warning"
+            print(f"[{'ok' if ok else 'fail'}] {title}: {detail}")
+            failures += 0 if ok else 1
+            layer_cases += 1
+
+    print(f"self-test: {len(cases) + layer_cases} cases, {failures} failure(s)")
     strays = leftovers()
     if strays:
         print(f"self-test: left behind {', '.join(strays)}")
@@ -288,7 +360,10 @@ def main(argv: list[str]) -> int:
         print(__doc__.strip())
         return 2
     path = Path(argv[0])
-    problems = check_archive(path)
+    warnings: list[str] = []
+    problems = check_archive(path, warnings)
+    for warning in warnings:
+        print(f"[pack] warning: {warning}")
     for problem in problems:
         print(f"[pack] {problem}")
     if problems:
