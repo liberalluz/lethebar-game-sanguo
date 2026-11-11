@@ -11,9 +11,23 @@
 [![Pack](https://img.shields.io/badge/pack-sanguo-c0392b.svg)](packs/sanguo/manifest.json)
 [![Engine](https://img.shields.io/badge/engine-%3E%3D4.7.0%20%3C5.0.0-478cbf.svg)](https://github.com/liberalluz/lethebar)
 
+## 包
+
+<!-- pack-badges:begin -->
+![packs](https://img.shields.io/badge/packs-3-6f42c1)
+![spec](https://img.shields.io/badge/spec-2.0.0-007ec6)
+![engine](https://img.shields.io/badge/engine-%3E%3D4.7.0%20%3C5.0.0-478cbf)
+
+| Kind | Pack | Version | Spec | Engine |
+| --- | --- | --- | --- | --- |
+| `bundle` | `sanguo` | `1.1.0` | `2.0.0` | `>=4.7.0 <5.0.0` |
+| `layer:content` | `sanguo-content` | `1.0.0` | `2.0.0` | `>=4.7.0 <5.0.0` |
+| `layer:mod` | `sanguo-hard` | `1.1.0` | `2.0.0` | `>=4.7.0 <5.0.0` |
+<!-- pack-badges:end -->
+
 ## 状态
 
-**`pack/sanguo/v1.0.0` 已发布。** 一局 24 回合，从初平元年的起兵讲到五级段位的尽头；三个资源决定它会不会提前结束——粮草、士卒、声望，任意一项归零就结束。
+**`pack/sanguo/v1.1.0` 已发布。** 一局 24 回合，从初平元年的起兵讲到五级段位的尽头；三个资源决定它会不会提前结束——粮草、士卒、声望，任意一项归零就结束。
 
 已知限制，全部在引擎侧、本仓不修：势力名与弧光段名是写死的中文，不随界面语言变；包里声明的时长会被收下，但菜单还不显示；受众会被校验，但没有任何东西按它筛选；图和声被画进一条带子和一个立绘栏，且只收 PNG、JPEG、WAV。
 
@@ -26,7 +40,7 @@
 
 ## 安装
 
-发布带两个文件：`sanguo.zip` 与 `sanguo-1.0.0.json`。构建把 zip 摆进引擎的 `app/builtin/`，那是加载器唯一会读包的地方；描述文件是玩家拿来核对 zip 的。摆进去之前先核：
+发布带两个文件：`sanguo.zip` 与 `sanguo-1.1.0.json`。构建把 zip 摆进引擎的 `app/builtin/`，那是加载器唯一会读包的地方；描述文件是玩家拿来核对 zip 的。摆进去之前先核：
 
 ```bash
 sha256sum sanguo.zip
@@ -43,10 +57,10 @@ sha256sum sanguo.zip
 | `manifest.json` | `id`、`version`、`specVersion`、`engine`、`protocol`、`capabilities`、`entry`、`saveSchema`、`assets`、`meta`、`content` |
 | `data/nodes.json` | 一个回合能打开的场景 |
 | `data/actions.json` | 玩家能做什么，每个选择花什么 |
-| `data/state.json` | 四个资源与它们的起始值 |
+| `data/ledger.json` | 四个资源与它们的起始值 |
 | `data/rules.json` | 一个选择被允许改什么 |
 | `data/phases.json` | 24 回合，五级段位落在第 1 / 6 / 11 / 16 / 21 回合，三个失败条件 |
-| `data/factions.json` | 撑起这一局的三家 |
+| `data/relations.json` | 撑起这一局的三家 |
 | `data/i18n/en.json` | 每一条可见中文的英文覆盖层 |
 | `assets/scene.png` | 场景带 |
 | `assets/theme.wav` | 主题音 |

@@ -1,0 +1,77 @@
+name: gate
+
+# Every pack is built and checked here: on a push to main, on a pull request,
+# and on a pack tag. The tools are read from the engine at ENGINE_REF instead of
+# being copied into this repository, so a pack is always judged by the engine
+# release this file names.
+#
+# Publishing is deliberately narrow. A tag shaped pack/<id>/v<version> publishes
+# only packs/<id>, and only when a release for that tag already exists — the
+# runbook creates the release with its written notes first, then this job
+# uploads the bytes to it. A push to main never creates or uploads anything.
+
+on:
+  push:
+    branches: [main]
+    tags: ["pack/**"]
+  pull_request:
+
+env:
+  ENGINE_REF: v0.7.5
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: check out the engine at the declared tag
+        uses: actions/checkout@v4
+        with:
+          repository: liberalluz/lethebar
+          ref: ${{ env.ENGINE_REF }}
+          path: engine
+
+      - name: build and check every pack
+        run: |
+          set -euo pipefail
+          found=0
+          for manifest in packs/*/manifest.json; do
+            id="$(basename "$(dirname "$manifest")")"
+            echo "=== $id"
+            python engine/infra/tool/release/pack.py build "packs/$id" --out dist
+            python engine/infra/checks/check_pack.py "dist/$id.zip"
+            found=$((found + 1))
+          done
+          echo "checked $found pack(s)"
+
+      - name: the README table still matches the manifests
+        run: python engine/infra/tool/release/pack.py badge . --check README.md
+
+      - name: pick the pack the tag names
+        id: pack
+        if: startsWith(github.ref, 'refs/tags/pack/')
+        run: |
+          set -euo pipefail
+          id="${GITHUB_REF_NAME#pack/}"
+          id="${id%/v*}"
+          if [[ ! -f "packs/${id}/manifest.json" ]]; then
+            echo "the tag names packs/${id}, which has no manifest" >&2
+            exit 1
+          fi
+          echo "id=${id}" >> "$GITHUB_OUTPUT"
+
+      - name: publish the tagged pack if its release exists
+        if: startsWith(github.ref, 'refs/tags/pack/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          id="${{ steps.pack.outputs.id }}"
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "no release for $GITHUB_REF_NAME yet; the runbook creates it with its notes"
+            exit 0
+          fi
+          python engine/infra/tool/release/pack.py hash "dist/$id.zip"
+          python engine/infra/tool/release/pack.py publish "dist/$id.zip" \
+            --repo "$GITHUB_REPOSITORY" --tag "$GITHUB_REF_NAME" --apply

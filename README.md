@@ -10,9 +10,23 @@ English · [简体中文](README.zh-CN.md)
 [![Pack](https://img.shields.io/badge/pack-sanguo-c0392b.svg)](packs/sanguo/manifest.json)
 [![Engine](https://img.shields.io/badge/engine-%3E%3D4.7.0%20%3C5.0.0-478cbf.svg)](https://github.com/liberalluz/lethebar)
 
+## Packages
+
+<!-- pack-badges:begin -->
+![packs](https://img.shields.io/badge/packs-3-6f42c1)
+![spec](https://img.shields.io/badge/spec-2.0.0-007ec6)
+![engine](https://img.shields.io/badge/engine-%3E%3D4.7.0%20%3C5.0.0-478cbf)
+
+| Kind | Pack | Version | Spec | Engine |
+| --- | --- | --- | --- | --- |
+| `bundle` | `sanguo` | `1.1.0` | `2.0.0` | `>=4.7.0 <5.0.0` |
+| `layer:content` | `sanguo-content` | `1.0.0` | `2.0.0` | `>=4.7.0 <5.0.0` |
+| `layer:mod` | `sanguo-hard` | `1.1.0` | `2.0.0` | `>=4.7.0 <5.0.0` |
+<!-- pack-badges:end -->
+
 ## Status
 
-**`pack/sanguo/v1.0.0` is released.** A run is 24 turns long. It opens at the
+**`pack/sanguo/v1.1.0` is released.** A run is 24 turns long. It opens at the
 first call to arms and ends at the fifth rank; three resources decide whether it
 ends early — grain, troops and standing, any one of them at zero.
 
@@ -40,7 +54,7 @@ band and one portrait column, and only from PNG, JPEG and WAV.
 
 ## Install
 
-The release carries two files: `sanguo.zip` and `sanguo-1.0.0.json`. A build
+The release carries two files: `sanguo.zip` and `sanguo-1.1.0.json`. A build
 stages the zip into the engine's `app/builtin/`, which is the only place the
 loader reads a package from; the descriptor is what a player hashes the zip
 against. Verify before staging:
@@ -61,10 +75,10 @@ ships its own packs, and this one reaches a build through staging.
 | `manifest.json` | `id`, `version`, `specVersion`, `engine`, `protocol`, `capabilities`, `entry`, `saveSchema`, `assets`, `meta`, `content` |
 | `data/nodes.json` | The scenes a turn can open |
 | `data/actions.json` | What a player can do, and what each choice costs |
-| `data/state.json` | The four resources and their starting values |
+| `data/ledger.json` | The four resources and their starting values |
 | `data/rules.json` | What a choice is allowed to change |
 | `data/phases.json` | 24 turns, five ranks at turns 1 / 6 / 11 / 16 / 21, three fail conditions |
-| `data/factions.json` | The three houses that carry the run |
+| `data/relations.json` | The three houses that carry the run |
 | `data/i18n/en.json` | The English overlay for every visible Chinese string |
 | `assets/scene.png` | The scene band |
 | `assets/theme.wav` | The theme |
